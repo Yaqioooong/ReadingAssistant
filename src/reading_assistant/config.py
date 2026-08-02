@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     # --- 向量库 / 分块 ---
     chroma_collection_name: str = _chroma_cfg.get('collection_name', 'reading_agent_chunks')
     chroma_persist_dir: str = _chroma_cfg.get('persist_directory', 'rag/chroma_db')
+    vector_store_backend: str = 'chroma'
     top_k: int = int(_chroma_cfg.get('k', 6))
     data_path: str = _chroma_cfg.get('data_path', 'data')
     md5_hex_store: str = _chroma_cfg.get('md5_hex_store', 'md5.txt')

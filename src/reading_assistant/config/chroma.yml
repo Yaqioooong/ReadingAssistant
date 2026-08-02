@@ -2,7 +2,6 @@ collection_name: reading_agent_chunks
 persist_directory: rag/chroma_db
 k: 6
 data_path: data
-md5_hex_store: md5.txt
 allow_knowledge_file_type: ['txt','pdf','epub']
 chunk_size: 800
 chunk_overlap: 100

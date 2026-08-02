@@ -9,7 +9,7 @@ src/reading_assistant/
 ├── config.py    # done: unified settings (pydantic-settings, .env + YAML)
 ├── parsers/     # done: txt/epub/pdf/docx parsers + factory
 ├── rag/         # TODO: chunking and vector retrieval
-├── storage/     # TODO: SQLAlchemy models, vector store, chat history
+├── storage/     # done: models, db session, dedup service, vector store adapters
 ├── graph/       # TODO: LangGraph pipelines (ingest, QA with HITL)
 ├── api/         # TODO: FastAPI app, routes, request/response schemas
 ├── model/       # done: LLM and embedding factories

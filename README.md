@@ -25,7 +25,7 @@
 
 - `parsers/`：已实现 txt / epub / pdf / docx 四类解析器与工厂分发。
 - `rag/`：无文本分块、无向量检索。
-- `storage/`：无 SQLAlchemy 模型、无向量库适配器。
+- `storage/`：已实现 SQLAlchemy 模型、数据库会话管理、分层去重入库服务、向量库适配器（ChromaDB + 内存实现）。
 - `graph/`：无 LangGraph 流水线（入库、问答、HITL）。
 - `api/`：无 FastAPI 应用与路由，前端调用的 `/api/documents`、`/api/sessions` 等接口尚不存在。
 - `tests/`：仅有 P0 冒烟测试（conftest.py / test_smoke.py）。
@@ -52,7 +52,7 @@
 │   ├── graph/        # TODO：LangGraph 流水线：入库、问答 + HITL（空包）
 │   ├── parsers/      # 已实现：txt / epub / pdf / docx 解析器 + 工厂（*_parser.py 命名）
 │   ├── rag/          # TODO：分块、向量检索（空包）
-│   ├── storage/      # TODO：SQLAlchemy 模型、向量库适配器、聊天记录（空包）
+│   ├── storage/      # 已实现：模型 / database / repositories / service（去重）/ vector_store
 │   ├── config.py             # 已实现：pydantic-settings 统一配置（.env + YAML）
 │   ├── model/
 │   │   └── factory.py        # 已实现：DeepSeek 对话模型 + DashScope Embedding 工厂
@@ -160,9 +160,9 @@ uvicorn reading_assistant.api.main:app --reload
 
 按依赖顺序排列：
 
-1. **统一配置层**：新增 `config.py`（pydantic-settings），收敛 `.env` 与 YAML，修复 `utils` 的扁平导入与路径工具问题。
-2. **parsers**：实现 epub / pdf / docx / txt 解析器与工厂注册。
-3. **storage**：SQLAlchemy 模型 + 向量库适配器（ChromaDB / Milvus 二选一）。
+1. ✅ **统一配置层**：新增 `config.py`（pydantic-settings），收敛 `.env` 与 YAML，修复 `utils` 的扁平导入与路径工具问题。
+2. ✅ **parsers**：实现 epub / pdf / docx / txt 解析器与工厂注册。
+3. ✅ **storage**：SQLAlchemy 模型 + 向量库适配器（ChromaDB / 内存）。
 4. **graph**：LangGraph 入库与问答流水线，含 HITL 状态。
 5. **api**：FastAPI 路由，对齐前端已有调用约定；同步实现 CLI。
 6. **tests**：补齐 pytest 单测与集成测试。

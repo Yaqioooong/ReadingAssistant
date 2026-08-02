@@ -8,7 +8,7 @@
 | --- | --- | --- |
 | P0 工程基础 | 统一配置层、包结构修复、构建与测试基础设施 | ✅ 已完成 |
 | P1 解析器 | `parsers/`：epub / pdf / docx / txt | ✅ 已完成 |
-| P2 存储层 | `storage/`：SQLAlchemy 模型 + 向量库适配器 | ⬜ 未开始 |
+| P2 存储层 | `storage/`：SQLAlchemy 模型 + 向量库适配器 + 分层去重 | ✅ 已完成 |
 | P3 RAG 层 | `rag/`：分块 + 向量检索 | ⬜ 未开始 |
 | P4 LangGraph | `graph/`：入库 / 问答 / HITL 流水线 | ⬜ 未开始 |
 | P5 FastAPI | `api/`：路由、schema、前端联调 | ⬜ 未开始 |
@@ -37,12 +37,23 @@
 
 ## P2 存储层（storage）
 
-- [ ] SQLAlchemy 模型：`Document`、`ChatSession`、`ChatMessage`、`HitlTask`
-- [ ] 建表与连接管理（读取 `DATABASE_URL`，不硬编码）
-- [ ] `vector_store.py` 适配器接口 + 实现（ChromaDB 与 Milvus 二选一，需先统一配置）
-- [ ] 上传 md5 去重（基于 `chroma.yml` 的 md5 配置）
+- [x] SQLAlchemy 模型：`Document`、`ChatSession`、`ChatMessage`、`HitlTask`
+  - `Document` 增加 `file_hash`（unique，文件字节 SHA-256）与 `content_hash`（归一化文本 SHA-256）
+  - 去除对 `md5.txt` 的依赖（`chroma.yml` 配置项删除，代码实现不再读取）
+- [x] 建表与连接管理（读取 `DATABASE_URL`，不硬编码）
+- [x] `vector_store.py` 适配器接口 + 实现（ChromaDB 与 Milvus 二选一，需先统一配置）
+- [x] 文档 repository 层：入库 / 查询 / 按哈希查重
+- [x] 分层去重入库流程：
+  1. 上传后先算文件 SHA-256，查 `file_hash` → 命中直接返回已有 `document_id`（`duplicate=true`，跳过解析）
+  2. 未命中才解析 → 文本归一化（去空白/格式）→ 算 `content_hash` → 再查
+  3. 命中 `content_hash` 默认复用已有文档（不重复入库）；如需保留两种格式可存独立版本并记录 `duplicate_of`
+  4. 插入时捕获唯一索引冲突（`IntegrityError`）→ 重新查询返回已有 id（并发兜底）
+  5. 重复上传响应语义：`duplicate=true + document_id`，不报错
 
-**验收标准：** 文档入库 / 查询 / 重复上传去重的测试通过。
+**验收标准：**
+- 文档入库 / 查询 / 重复上传去重的测试通过
+- 去重测试覆盖：同一文件两次上传、同内容不同文件名、并发冲突（唯一索引兜底）
+- 向量库适配器接口可 mock，不依赖真实向量库即可单测
 
 ## P3 RAG 层（rag）
 
