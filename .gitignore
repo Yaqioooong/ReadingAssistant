@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 环境与密钥
+.env
+.env.local
+
+# 系统
+.DS_Store
+.idea/
+
+# 上传的临时文件
+uploads/
+tmp/
+chroma_data/

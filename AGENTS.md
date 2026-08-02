@@ -1,0 +1,66 @@
+# Repository Guidelines
+
+ReadingAssistant parses ebooks (EPUB/PDF/DOCX/TXT) and answers questions about characters and events using RAG, LangGraph, PostgreSQL, and vector search, with HITL clarification and persistent chat history. The repo is in scaffold stage: frontend and utilities are implemented; backend core modules are TODO.
+
+## Project Structure & Module Organization
+
+```
+src/reading_assistant/
+├── parsers/     # TODO: book parsers (epub/pdf/docx/txt)
+├── rag/         # TODO: chunking and vector retrieval
+├── storage/     # TODO: SQLAlchemy models, vector store, chat history
+├── graph/       # TODO: LangGraph pipelines (ingest, QA with HITL)
+├── api/         # TODO: FastAPI app, routes, request/response schemas
+├── model/       # done: LLM and embedding factories
+├── utils/       # done: config, logging, path helpers
+└── config/      # YAML configuration files
+tests/           # TODO: pytest suite (not yet created)
+frontend/        # Vite + Vue 3 single-page app
+```
+
+Parsers and storage are designed to be swappable: add a format as a `BookParser` subclass and register it in `parsers/factory.py`.
+
+## Development Plan
+
+- Development must follow [DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md): complete each phase in order, including its tests and acceptance criteria, before starting the next.
+- Work not listed in the plan must be added to the plan before it is implemented.
+
+## Build, Test, and Development Commands
+
+- `pip install -r requirements.txt` — install Python dependencies (`requirements.txt` is the source of truth; `pyproject.toml` declares none).
+- `uvicorn reading_assistant.api.main:app --reload` — run the API locally (planned; `api/main.py` is not implemented).
+- `cd frontend && npm install && npm run dev` — run the frontend dev server on http://localhost:5173 (proxies `/api` to port 8000).
+- `npm run build` — build the frontend into `frontend/dist`.
+- `pytest` — run the test suite (installed; no tests exist yet).
+
+## Coding Style & Naming Conventions
+
+- Python 3.13+, formatted with Ruff (line length 100); note Ruff is not yet in `requirements.txt`.
+- `snake_case` for functions and variables, `PascalCase` for classes, `UPPER_SNAKE_CASE` for constants.
+- Type hints required on public signatures; Pydantic models at API boundaries.
+- Read settings via `get_settings()` from `config.py`; never hardcode URLs or keys.
+- Frontend uses Vue 3 `<script setup>` single-file components.
+
+## Testing Guidelines
+
+- Use pytest; name files `test_<module>.py` and functions `test_<behavior>`.
+- Each new feature needs at least one happy-path and one edge-case test; keep coverage from decreasing.
+- Tests needing PostgreSQL or an LLM key use pytest marks and skip when unavailable.
+
+## Commit & Pull Request Guidelines
+
+- Use Conventional Commits (`feat:`, `fix:`, `refactor:`, `docs:`, `test:`, `chore:`); no commits exist yet, so establish it from the first.
+- Keep commits focused; each commit makes one logical change.
+- PRs describe the change and how it was tested, link related issues, and include screenshots for UI or API output changes.
+
+## Security & Configuration Tips
+
+- Never commit secrets; copy `.env.example` to `.env` (git-ignored).
+- Treat uploaded books as user data and never log their contents.
+
+## Agent-Specific Instructions
+
+- Read this file first and follow existing conventions.
+- Follow the phase order in DEVELOPMENT_PLAN.md; never skip ahead of the current phase.
+- Do not add dependencies without justification; prefer the current stack.
+- Keep scaffolds honest: mark unfinished work with TODO; never claim unimplemented features.
