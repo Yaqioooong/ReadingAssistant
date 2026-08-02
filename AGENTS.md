@@ -6,6 +6,7 @@ ReadingAssistant parses ebooks (EPUB/PDF/DOCX/TXT) and answers questions about c
 
 ```
 src/reading_assistant/
+├── config.py    # done: unified settings (pydantic-settings, .env + YAML)
 ├── parsers/     # TODO: book parsers (epub/pdf/docx/txt)
 ├── rag/         # TODO: chunking and vector retrieval
 ├── storage/     # TODO: SQLAlchemy models, vector store, chat history
@@ -14,8 +15,9 @@ src/reading_assistant/
 ├── model/       # done: LLM and embedding factories
 ├── utils/       # done: config, logging, path helpers
 └── config/      # YAML configuration files
-tests/           # TODO: pytest suite (not yet created)
+tests/           # pytest smoke tests (conftest.py, test_smoke.py)
 frontend/        # Vite + Vue 3 single-page app
+docker-compose.yml  # PostgreSQL 16
 ```
 
 Parsers and storage are designed to be swappable: add a format as a `BookParser` subclass and register it in `parsers/factory.py`.
@@ -27,15 +29,17 @@ Parsers and storage are designed to be swappable: add a format as a `BookParser`
 
 ## Build, Test, and Development Commands
 
-- `pip install -r requirements.txt` — install Python dependencies (`requirements.txt` is the source of truth; `pyproject.toml` declares none).
+- `pip install -e ".[dev]"` — install the package and dev dependencies (`pyproject.toml` is the source of truth; `requirements.txt` is a thin `-e .[dev]` alias).
+- `docker compose up -d` — start PostgreSQL for local development.
 - `uvicorn reading_assistant.api.main:app --reload` — run the API locally (planned; `api/main.py` is not implemented).
 - `cd frontend && npm install && npm run dev` — run the frontend dev server on http://localhost:5173 (proxies `/api` to port 8000).
 - `npm run build` — build the frontend into `frontend/dist`.
-- `pytest` — run the test suite (installed; no tests exist yet).
+- `pytest` — run the test suite.
+- `ruff check src tests` and `ruff format --check src tests` — lint and check formatting.
 
 ## Coding Style & Naming Conventions
 
-- Python 3.13+, formatted with Ruff (line length 100); note Ruff is not yet in `requirements.txt`.
+- Python 3.13+, formatted with Ruff (line length 100, single quotes).
 - `snake_case` for functions and variables, `PascalCase` for classes, `UPPER_SNAKE_CASE` for constants.
 - Type hints required on public signatures; Pydantic models at API boundaries.
 - Read settings via `get_settings()` from `config.py`; never hardcode URLs or keys.

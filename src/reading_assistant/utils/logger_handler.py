@@ -1,10 +1,11 @@
 import logging
 import os
 from datetime import datetime
-from utils.path_tools import get_abs_path
+
+from reading_assistant.utils.path_tools import get_abs_path
 
 # 日志保存的根目录
-LOG_ROOT = get_abs_path("logs")
+LOG_ROOT = get_abs_path('logs')
 # 确保日志目录存在
 os.makedirs(LOG_ROOT, exist_ok=True)
 
@@ -15,10 +16,10 @@ DEFAULT_LOG_FORMAT = logging.Formatter(
 
 
 def get_logger(
-        name: str = 'ReadingAssistant',
-        console_level: int = logging.INFO,
-        file_level: int = logging.DEBUG,
-        log_file=None
+    name: str = 'ReadingAssistant',
+    console_level: int = logging.INFO,
+    file_level: int = logging.DEBUG,
+    log_file: str | None = None,
 ) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
@@ -45,10 +46,11 @@ def get_logger(
 
     return logger
 
+
 # 快捷获取日志器
 logger = get_logger()
 
 if __name__ == '__main__':
-    logger.info("信息日志")
-    logger.error("报错日志")
-    logger.warning("警告日志")
+    logger.info('信息日志')
+    logger.error('报错日志')
+    logger.warning('警告日志')

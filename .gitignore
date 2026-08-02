@@ -21,3 +21,5 @@ htmlcov/
 uploads/
 tmp/
 chroma_data/
+rag/chroma_db/
+logs/

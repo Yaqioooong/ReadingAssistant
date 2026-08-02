@@ -6,7 +6,7 @@
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| P0 工程基础 | 统一配置层、包结构修复、构建与测试基础设施 | ⬜ 未开始 |
+| P0 工程基础 | 统一配置层、包结构修复、构建与测试基础设施 | ✅ 已完成 |
 | P1 解析器 | `parsers/`：epub / pdf / docx / txt | ⬜ 未开始 |
 | P2 存储层 | `storage/`：SQLAlchemy 模型 + 向量库适配器 | ⬜ 未开始 |
 | P3 RAG 层 | `rag/`：分块 + 向量检索 | ⬜ 未开始 |
@@ -17,12 +17,12 @@
 
 ## P0 工程基础
 
-- [ ] 新增 `src/reading_assistant/config.py`（pydantic-settings），统一读取 `.env` 与 `config/*.yml`，收敛重复配置
-- [ ] 修复 `model/factory.py` 与 `utils/*` 的扁平导入，改为 `reading_assistant.*` 包内导入
-- [ ] 修复 `path_tools.get_project_root()`，使其返回仓库根目录（而非包目录）
-- [ ] 完善 `pyproject.toml`：声明运行时依赖、dev extras、ruff / pytest 配置
-- [ ] 新增 `docker-compose.yml`（PostgreSQL）并同步 `Quick_Start.md`
-- [ ] 建立测试基础设施（`conftest.py`、pytest 配置、日志/路径 fixtures）
+- [x] 新增 `src/reading_assistant/config.py`（pydantic-settings），统一读取 `.env` 与 `config/*.yml`，收敛重复配置
+- [x] 修复 `model/factory.py` 与 `utils/*` 的扁平导入，改为 `reading_assistant.*` 包内导入
+- [x] 修复 `path_tools.get_project_root()`，使其返回仓库根目录（而非包目录）
+- [x] 完善 `pyproject.toml`：声明运行时依赖、dev extras、ruff / pytest 配置
+- [x] 新增 `docker-compose.yml`（PostgreSQL）并同步 `Quick_Start.md`
+- [x] 建立测试基础设施（`conftest.py`、pytest 配置、日志/路径 fixtures）
 
 **验收标准：** `pip install -e ".[dev]"` 可安装；从任意工作目录 `import reading_assistant` 正常；ruff check / format 通过；pytest 可空跑通过。
 

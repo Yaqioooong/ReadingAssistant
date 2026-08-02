@@ -28,8 +28,8 @@
 - `storage/`：无 SQLAlchemy 模型、无向量库适配器。
 - `graph/`：无 LangGraph 流水线（入库、问答、HITL）。
 - `api/`：无 FastAPI 应用与路由，前端调用的 `/api/documents`、`/api/sessions` 等接口尚不存在。
-- `tests/`：无 pytest 测试（目录尚未创建）。
-- CLI 与 PostgreSQL 编排（docker-compose）均未落地。
+- `tests/`：仅有 P0 冒烟测试（conftest.py / test_smoke.py）。
+- CLI 未落地；PostgreSQL 编排已通过 `docker-compose.yml` 提供。
 
 ## 技术栈
 
@@ -53,6 +53,7 @@
 │   ├── parsers/      # TODO：epub / pdf / docx / txt 解析器（空包）
 │   ├── rag/          # TODO：分块、向量检索（空包）
 │   ├── storage/      # TODO：SQLAlchemy 模型、向量库适配器、聊天记录（空包）
+│   ├── config.py             # 已实现：pydantic-settings 统一配置（.env + YAML）
 │   ├── model/
 │   │   └── factory.py        # 已实现：DeepSeek 对话模型 + DashScope Embedding 工厂
 │   ├── utils/
@@ -60,10 +61,11 @@
 │   │   ├── logger_handler.py # 已实现：控制台 + 文件日志
 │   │   └── path_tools.py     # 已实现：项目根目录 / 绝对路径
 │   └── config/       # agent.yml / chroma.yml / model.yml / prompt.yml
-├── tests/            # TODO：pytest 测试（目录尚不存在）
+├── tests/            # P0 冒烟测试：conftest.py + test_smoke.py
 ├── frontend/         # Vite + Vue 3 单页应用（上传解析 + 聊天问答）
-├── requirements.txt  # Python 依赖清单（当前唯一安装来源）
-├── pyproject.toml    # 包元数据（dependencies 为空，暂无构建配置）
+├── requirements.txt  # 开发安装别名（-e .[dev]）
+├── pyproject.toml    # 依赖清单与 ruff / pytest 配置
+├── docker-compose.yml # PostgreSQL 16
 ├── .env.example      # 环境变量模板（复制为 .env 使用）
 ├── Quick_Start.md    # PostgreSQL 建库步骤
 └── README.md
@@ -78,10 +80,10 @@
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e ".[dev]"
 ```
 
-> 当前 `pyproject.toml` 未声明依赖，请使用 `requirements.txt` 安装。
+依赖清单以 `pyproject.toml` 为准（dev extras 含 pytest / ruff）；`requirements.txt` 是 `-e .[dev]` 的安装别名。
 
 ### 2. 配置环境变量
 
@@ -132,7 +134,7 @@ uvicorn reading_assistant.api.main:app --reload
 | `API_HOST` / `API_PORT` | 服务监听地址 / 端口 | `0.0.0.0` / `8000` |
 | `LOG_LEVEL` | 日志级别 | `INFO` |
 
-> 注意：`.env.example` 中 `MD5_HEX_STORE`、`ALLOWED_KNOWEDGE_FILE_TYPE`、`SEPARATORS` 三个键使用了 `:` 分隔，不是标准 `.env` 键值格式，且这些值目前未被代码消费；建议后续统一收敛到 YAML 或 pydantic-settings 一处管理。
+> 说明：`MD5_HEX_STORE`、`ALLOWED_KNOWEDGE_FILE_TYPE`、`SEPARATORS` 等参数以 `config/chroma.yml` 为准，不通过环境变量覆盖。
 
 ## 数据存储（规划中）
 
