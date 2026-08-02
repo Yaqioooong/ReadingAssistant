@@ -38,8 +38,7 @@ class Settings(BaseSettings):
     app_name: str = _agent_cfg.get('app_name', 'ReadingAssistant')
     external_data_path: str = _agent_cfg.get('external_data_path', 'data/external/records.csv')
     database_url: str = (
-        'postgresql+psycopg://psql_reading:123456'
-        '@localhost:5432/reading_agent?sslmode=disable'
+        'postgresql+psycopg://psql_reading:123456@localhost:5432/reading_agent?sslmode=disable'
     )
 
     # --- 模型 ---

@@ -7,7 +7,7 @@ ReadingAssistant parses ebooks (EPUB/PDF/DOCX/TXT) and answers questions about c
 ```
 src/reading_assistant/
 ├── config.py    # done: unified settings (pydantic-settings, .env + YAML)
-├── parsers/     # TODO: book parsers (epub/pdf/docx/txt)
+├── parsers/     # done: txt/epub/pdf/docx parsers + factory
 ├── rag/         # TODO: chunking and vector retrieval
 ├── storage/     # TODO: SQLAlchemy models, vector store, chat history
 ├── graph/       # TODO: LangGraph pipelines (ingest, QA with HITL)
@@ -15,7 +15,7 @@ src/reading_assistant/
 ├── model/       # done: LLM and embedding factories
 ├── utils/       # done: config, logging, path helpers
 └── config/      # YAML configuration files
-tests/           # pytest smoke tests (conftest.py, test_smoke.py)
+tests/           # pytest tests (smoke + parsers)
 frontend/        # Vite + Vue 3 single-page app
 docker-compose.yml  # PostgreSQL 16
 ```

@@ -23,7 +23,7 @@
 
 **尚未实现（TODO）：**
 
-- `parsers/`：无任何电子书解析器。
+- `parsers/`：已实现 txt / epub / pdf / docx 四类解析器与工厂分发。
 - `rag/`：无文本分块、无向量检索。
 - `storage/`：无 SQLAlchemy 模型、无向量库适配器。
 - `graph/`：无 LangGraph 流水线（入库、问答、HITL）。
@@ -50,7 +50,7 @@
 ├── src/reading_assistant/
 │   ├── api/          # TODO：FastAPI 应用、路由、请求/响应模型（空包）
 │   ├── graph/        # TODO：LangGraph 流水线：入库、问答 + HITL（空包）
-│   ├── parsers/      # TODO：epub / pdf / docx / txt 解析器（空包）
+│   ├── parsers/      # 已实现：txt / epub / pdf / docx 解析器 + 工厂（*_parser.py 命名）
 │   ├── rag/          # TODO：分块、向量检索（空包）
 │   ├── storage/      # TODO：SQLAlchemy 模型、向量库适配器、聊天记录（空包）
 │   ├── config.py             # 已实现：pydantic-settings 统一配置（.env + YAML）
@@ -61,7 +61,7 @@
 │   │   ├── logger_handler.py # 已实现：控制台 + 文件日志
 │   │   └── path_tools.py     # 已实现：项目根目录 / 绝对路径
 │   └── config/       # agent.yml / chroma.yml / model.yml / prompt.yml
-├── tests/            # P0 冒烟测试：conftest.py + test_smoke.py
+├── tests/            # 冒烟测试 + 解析器测试（test_smoke.py / test_parsers.py）
 ├── frontend/         # Vite + Vue 3 单页应用（上传解析 + 聊天问答）
 ├── requirements.txt  # 开发安装别名（-e .[dev]）
 ├── pyproject.toml    # 依赖清单与 ruff / pytest 配置

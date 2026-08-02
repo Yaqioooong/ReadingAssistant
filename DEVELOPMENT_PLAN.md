@@ -7,7 +7,7 @@
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | P0 工程基础 | 统一配置层、包结构修复、构建与测试基础设施 | ✅ 已完成 |
-| P1 解析器 | `parsers/`：epub / pdf / docx / txt | ⬜ 未开始 |
+| P1 解析器 | `parsers/`：epub / pdf / docx / txt | ✅ 已完成 |
 | P2 存储层 | `storage/`：SQLAlchemy 模型 + 向量库适配器 | ⬜ 未开始 |
 | P3 RAG 层 | `rag/`：分块 + 向量检索 | ⬜ 未开始 |
 | P4 LangGraph | `graph/`：入库 / 问答 / HITL 流水线 | ⬜ 未开始 |
@@ -28,10 +28,10 @@
 
 ## P1 解析器（parsers）
 
-- [ ] `BookParser` 抽象基类：统一输出纯文本 + 元数据（标题、作者、章节）
-- [ ] 实现 `TxtParser`、`EpubParser`、`PdfParser`、`DocxParser`
-- [ ] `parsers/factory.py`：按扩展名注册并分发
-- [ ] 每个解析器至少一个 happy-path 与一个边界用例测试（空文件、损坏文件、加密 PDF）
+- [x] `BookParser` 抽象基类：统一输出纯文本 + 元数据（标题、作者、章节）
+- [x] 实现 `TxtParser`、`EpubParser`、`PdfParser`、`DocxParser`
+- [x] `parsers/factory.py`：按扩展名注册并分发
+- [x] 每个解析器至少一个 happy-path 与一个边界用例测试（空文件、损坏文件、加密 PDF）
 
 **验收标准：** 四类格式解析测试全部通过；`factory` 能识别并分发正确解析器。
 
