@@ -11,6 +11,7 @@ from reading_assistant.parsers.base import (
     EncryptedFileError,
     ParsedBook,
     ParseError,
+    resolve_book_path,
 )
 
 
@@ -18,7 +19,9 @@ class PdfParser(BookParser):
     extensions = frozenset({'.pdf'})
 
     def parse(self, path: str | Path) -> ParsedBook:
-        path = Path(path)
+        path = resolve_book_path(path)
+        if not path.is_file():
+            raise ParseError(f'文件不存在: {path}')
         try:
             reader = PdfReader(str(path))
         except PdfReadError as exc:

@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from reading_assistant.utils.path_tools import get_abs_path
+
 
 class ParseError(Exception):
     """解析失败（文件缺失、损坏或不支持）。"""
@@ -15,6 +17,21 @@ class UnsupportedFormatError(ParseError):
 
 class EncryptedFileError(ParseError):
     """文件已加密，需要密码。"""
+
+
+def resolve_book_path(path: str | Path) -> Path:
+    """解析书籍路径：字面路径优先，其次仓库根目录相对路径。
+
+    允许在任意工作目录下使用相对路径，例如
+    ``parse_book('data/books/sample_book.txt')``。
+    """
+    literal = Path(path)
+    if literal.is_file():
+        return literal
+    repo_relative = Path(get_abs_path(str(literal)))
+    if repo_relative.is_file():
+        return repo_relative
+    return literal
 
 
 @dataclass

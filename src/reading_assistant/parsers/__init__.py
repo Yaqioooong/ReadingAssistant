@@ -7,6 +7,7 @@ from reading_assistant.parsers.base import (
     ParsedBook,
     ParseError,
     UnsupportedFormatError,
+    resolve_book_path,
 )
 from reading_assistant.parsers.docx_parser import DocxParser
 from reading_assistant.parsers.epub_parser import EpubParser
@@ -27,4 +28,5 @@ __all__ = [
     'UnsupportedFormatError',
     'get_parser',
     'parse_book',
+    'resolve_book_path',
 ]

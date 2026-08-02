@@ -6,14 +6,22 @@ import ebooklib
 from bs4 import BeautifulSoup
 from ebooklib import epub
 
-from reading_assistant.parsers.base import BookParser, Chapter, ParsedBook, ParseError
+from reading_assistant.parsers.base import (
+    BookParser,
+    Chapter,
+    ParsedBook,
+    ParseError,
+    resolve_book_path,
+)
 
 
 class EpubParser(BookParser):
     extensions = frozenset({'.epub'})
 
     def parse(self, path: str | Path) -> ParsedBook:
-        path = Path(path)
+        path = resolve_book_path(path)
+        if not path.is_file():
+            raise ParseError(f'文件不存在: {path}')
         try:
             book = epub.read_epub(str(path))
         except Exception as exc:  # ebooklib 对损坏文件抛出多种异常

@@ -3,7 +3,13 @@
 import re
 from pathlib import Path
 
-from reading_assistant.parsers.base import BookParser, Chapter, ParsedBook, ParseError
+from reading_assistant.parsers.base import (
+    BookParser,
+    Chapter,
+    ParsedBook,
+    ParseError,
+    resolve_book_path,
+)
 
 # 匹配形如 "第一章 开端"、"第1章"、"Chapter 2"、"序章" 等章节标题行
 _CHAPTER_RE = re.compile(
@@ -19,7 +25,7 @@ class TxtParser(BookParser):
     extensions = frozenset({'.txt'})
 
     def parse(self, path: str | Path) -> ParsedBook:
-        path = Path(path)
+        path = resolve_book_path(path)
         if not path.is_file():
             raise ParseError(f'文件不存在: {path}')
         text = self._read_text(path)

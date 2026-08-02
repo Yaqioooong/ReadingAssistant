@@ -7,7 +7,7 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from reading_assistant.parsers import ParsedBook, ParseError, parse_book
+from reading_assistant.parsers import ParsedBook, ParseError, parse_book, resolve_book_path
 from reading_assistant.storage.models import Document
 from reading_assistant.storage.repositories import (
     get_document_by_content_hash,
@@ -46,7 +46,7 @@ class DocumentService:
         self._session = session
 
     def add_book(self, path: str | Path) -> AddBookResult:
-        path = Path(path)
+        path = resolve_book_path(path)
         try:
             raw = path.read_bytes()
         except OSError as exc:

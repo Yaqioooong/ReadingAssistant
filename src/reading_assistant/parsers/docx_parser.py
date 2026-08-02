@@ -5,14 +5,22 @@ from pathlib import Path
 from docx import Document
 from docx.opc.exceptions import PackageNotFoundError
 
-from reading_assistant.parsers.base import BookParser, Chapter, ParsedBook, ParseError
+from reading_assistant.parsers.base import (
+    BookParser,
+    Chapter,
+    ParsedBook,
+    ParseError,
+    resolve_book_path,
+)
 
 
 class DocxParser(BookParser):
     extensions = frozenset({'.docx'})
 
     def parse(self, path: str | Path) -> ParsedBook:
-        path = Path(path)
+        path = resolve_book_path(path)
+        if not path.is_file():
+            raise ParseError(f'文件不存在: {path}')
         try:
             document = Document(str(path))
         except PackageNotFoundError as exc:

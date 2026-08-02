@@ -216,3 +216,31 @@ class TestFactory:
     def test_unsupported_extension_raises(self) -> None:
         with pytest.raises(UnsupportedFormatError):
             get_parser('book.mobi')
+
+
+class TestPathResolution:
+    def test_missing_file_raises_clear_error(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+
+        with pytest.raises(ParseError, match='不存在'):
+            parse_book('nonexistent.txt')
+
+    def test_relative_path_falls_back_to_repo_root(self, tmp_path: Path, monkeypatch) -> None:
+        book = tmp_path / 'fallback_book.txt'
+        book.write_text('第一章 开端\n正文内容。', encoding='utf-8')
+        monkeypatch.chdir(tmp_path.parent)
+        monkeypatch.setattr(
+            'reading_assistant.parsers.base.get_abs_path', lambda rel: str(tmp_path / rel)
+        )
+
+        result = parse_book('fallback_book.txt')
+
+        assert result.title == 'fallback_book'
+        assert result.chapter_count == 1
+
+    def test_parse_repo_sample_from_other_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+
+        result = parse_book('data/books/sample_book.txt')
+
+        assert result.chapter_count == 3
