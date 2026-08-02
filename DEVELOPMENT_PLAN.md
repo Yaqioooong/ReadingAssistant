@@ -9,7 +9,7 @@
 | P0 工程基础 | 统一配置层、包结构修复、构建与测试基础设施 | ✅ 已完成 |
 | P1 解析器 | `parsers/`：epub / pdf / docx / txt | ✅ 已完成 |
 | P2 存储层 | `storage/`：SQLAlchemy 模型 + 向量库适配器 + 分层去重 | ✅ 已完成 |
-| P3 RAG 层 | `rag/`：分块 + 向量检索 | ⬜ 未开始 |
+| P3 RAG 层 | `rag/`：分块 + 向量检索 | ✅ 已完成 |
 | P4 LangGraph | `graph/`：入库 / 问答 / HITL 流水线 | ⬜ 未开始 |
 | P5 FastAPI | `api/`：路由、schema、前端联调 | ⬜ 未开始 |
 | P6 CLI | `cli.py`：ingest / ask 命令 | ⬜ 未开始 |
@@ -57,9 +57,9 @@
 
 ## P3 RAG 层（rag）
 
-- [ ] `chunking.py`：按 `separators` 分块，`chunk_size=800` / `chunk_overlap=100`
-- [ ] Embedding（DashScope `text-embedding-v4`）+ top-k 检索（`k=6`）
-- [ ] 检索结果携带元数据（文档 id、章节、页码），支持引用
+- [x] `chunking.py`：按 `separators` 分块，`chunk_size=800` / `chunk_overlap=100`
+- [x] Embedding（DashScope `text-embedding-v4`）+ top-k 检索（`k=6`）
+- [x] 检索结果携带元数据（文档 id、章节、页码），支持引用
 
 **验收标准：** 检索能返回相关片段及排序结果；chunking 边界测试通过。
 

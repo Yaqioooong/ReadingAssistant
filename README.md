@@ -24,7 +24,7 @@
 **尚未实现（TODO）：**
 
 - `parsers/`：已实现 txt / epub / pdf / docx 四类解析器与工厂分发。
-- `rag/`：无文本分块、无向量检索。
+- `rag/`：已实现文本分块（chunking）与向量检索器（retriever），检索结果携带文档/章节元数据与引用。
 - `storage/`：已实现 SQLAlchemy 模型、数据库会话管理、分层去重入库服务、向量库适配器（ChromaDB + 内存实现）。
 - `graph/`：无 LangGraph 流水线（入库、问答、HITL）。
 - `api/`：无 FastAPI 应用与路由，前端调用的 `/api/documents`、`/api/sessions` 等接口尚不存在。
@@ -51,7 +51,7 @@
 │   ├── api/          # TODO：FastAPI 应用、路由、请求/响应模型（空包）
 │   ├── graph/        # TODO：LangGraph 流水线：入库、问答 + HITL（空包）
 │   ├── parsers/      # 已实现：txt / epub / pdf / docx 解析器 + 工厂（*_parser.py 命名）
-│   ├── rag/          # TODO：分块、向量检索（空包）
+│   ├── rag/          # 已实现：chunking（分块）+ retriever（检索）
 │   ├── storage/      # 已实现：模型 / database / repositories / service（去重）/ vector_store
 │   ├── config.py             # 已实现：pydantic-settings 统一配置（.env + YAML）
 │   ├── model/
