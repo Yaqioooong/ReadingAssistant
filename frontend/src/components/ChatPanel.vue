@@ -1,5 +1,5 @@
 <script setup>
-import { ref, nextTick, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
 import {
   createSession,
   listSessions,
@@ -19,6 +19,15 @@ const question = ref('')
 const filterDoc = ref('')
 const sending = ref(false)
 const messageBox = ref(null)
+
+const currentTitle = computed(() => {
+  const session = sessions.value.find((item) => item.id === currentSessionId.value)
+  return session ? sessionLabel(session) : '新的对话'
+})
+
+function sessionLabel(session) {
+  return `会话 ${session.id.slice(0, 8)}`
+}
 
 async function loadSessions() {
   try {
@@ -106,57 +115,81 @@ onMounted(loadSessions)
 <template>
   <div class="chat-layout">
     <aside class="chat-sidebar">
-      <button class="btn primary block" :disabled="sending" @click="createNewSession">
-        ＋ 新建会话
+      <button class="new-chat" :disabled="sending" @click="createNewSession">
+        <span class="plus">＋</span>
+        新建对话
       </button>
 
-      <p class="field-label">检索范围</p>
-      <select v-model="filterDoc" class="select">
-        <option value="">全部书籍</option>
-        <option v-for="doc in documents" :key="doc.id" :value="doc.id">
-          {{ doc.filename }}
-        </option>
-      </select>
-
-      <p class="field-label">历史会话</p>
-      <ul class="session-list">
-        <li
-          v-for="s in sessions"
-          :key="s.id"
-          :class="{ active: s.id === currentSessionId }"
-          @click="selectSession(s.id)"
-        >
-          会话 {{ s.id.slice(0, 8) }} · {{ formatTime(s.created_at) }}
-        </li>
-      </ul>
-      <p v-if="!sessions.length" class="muted">暂无会话</p>
+      <div class="sidebar-section">
+        <p class="field-label">历史会话</p>
+        <ul v-if="sessions.length" class="session-list">
+          <li
+            v-for="s in sessions"
+            :key="s.id"
+            :class="{ active: s.id === currentSessionId }"
+            @click="selectSession(s.id)"
+          >
+            <span class="session-title">{{ sessionLabel(s) }}</span>
+            <span class="session-time">{{ formatTime(s.created_at) }}</span>
+          </li>
+        </ul>
+        <p v-else class="muted empty-inline">暂无会话</p>
+      </div>
     </aside>
 
     <div class="chat-main">
+      <header class="chat-header">
+        <div class="chat-header-inner">
+          <h2 class="chat-title">{{ currentTitle }}</h2>
+          <label class="filter">
+            <span class="filter-label">检索范围</span>
+            <select v-model="filterDoc" class="select">
+              <option value="">全部书籍</option>
+              <option v-for="doc in documents" :key="doc.id" :value="doc.id">
+                {{ doc.filename }}
+              </option>
+            </select>
+          </label>
+        </div>
+      </header>
+
       <div ref="messageBox" class="messages">
-        <p v-if="!messages.length" class="empty">选择或新建会话，开始提问吧</p>
-        <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
-          <span v-if="m.role === 'assistant'" class="meta">AI 助手</span>
-          <span class="content">{{ m.content }}</span>
-          <div v-if="m.citations && m.citations.length" class="citations">
-            <div v-for="(c, j) in m.citations" :key="j" class="citation">
-              <span class="src">{{ citationSource(c) }}</span>
-              <div class="excerpt">{{ c.excerpt }}</div>
+        <div class="messages-inner">
+          <div v-if="!messages.length" class="empty-state">
+            <div class="empty-icon">💬</div>
+            <p class="empty-title">选择或新建会话，开始提问吧</p>
+            <p class="empty-hint">例如：张三在本书中的事件时间线是怎样的？</p>
+          </div>
+          <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
+            <div class="msg-inner">
+              <div class="msg-body">
+                <span v-if="m.role === 'assistant'" class="meta">AI 助手</span>
+                <span class="content">{{ m.content }}</span>
+                <div v-if="m.citations && m.citations.length" class="citations">
+                  <div v-for="(c, j) in m.citations" :key="j" class="citation">
+                    <span class="src">{{ citationSource(c) }}</span>
+                    <div class="excerpt">{{ c.excerpt }}</div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
       </div>
 
       <div class="chat-input">
-        <textarea
-          v-model="question"
-          rows="2"
-          placeholder="例如：张三在本书中的事件时间线是怎样的？"
-          @keydown.enter.exact.prevent="send"
-        ></textarea>
-        <button class="btn primary send" :disabled="sending" @click="send">
-          {{ sending ? '发送中…' : '发送' }}
-        </button>
+        <div class="input-inner">
+          <textarea
+            v-model="question"
+            rows="2"
+            placeholder="向书籍提问，Enter 发送，Shift + Enter 换行"
+            @keydown.enter.exact.prevent="send"
+          ></textarea>
+          <button class="send-btn" :disabled="sending || !question.trim()" @click="send">
+            {{ sending ? '…' : '↑' }}
+          </button>
+        </div>
+        <p class="input-hint">回答基于已上传书籍内容，可在右上角指定检索范围</p>
       </div>
     </div>
   </div>

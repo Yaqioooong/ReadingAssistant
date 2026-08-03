@@ -8,11 +8,15 @@ from reading_assistant.storage.database import (
 )
 from reading_assistant.storage.models import Base, ChatMessage, ChatSession, Document, HitlTask
 from reading_assistant.storage.repositories import (
+    create_hitl_task,
     get_document,
     get_document_by_content_hash,
     get_document_by_file_hash,
+    get_hitl_task,
     insert_document,
     list_documents,
+    reject_hitl_task,
+    submit_hitl_clarification,
 )
 from reading_assistant.storage.service import (
     AddBookResult,
@@ -42,16 +46,20 @@ __all__ = [
     'SearchHit',
     'StoredChunk',
     'VectorStore',
+    'create_hitl_task',
     'create_db_engine',
     'create_session_factory',
     'create_vector_store',
     'get_document',
     'get_document_by_content_hash',
     'get_document_by_file_hash',
+    'get_hitl_task',
     'init_db',
     'insert_document',
     'list_documents',
     'normalize_text',
+    'reject_hitl_task',
     'session_scope',
     'sha256_hex',
+    'submit_hitl_clarification',
 ]

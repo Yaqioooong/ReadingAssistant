@@ -25,3 +25,7 @@ CREATE DATABASE reading_agent OWNER psql_reading;
 ## 2. 建表
 
 表由应用启动时自动创建（SQLAlchemy `create_all`，P2 阶段实现）。
+
+> 注意：`create_all` 只会创建**不存在的表**，不会给已存在的表加列或改类型。
+> 若模型变更后启动报 `UndefinedColumn` 之类的错误，说明本地库中有旧版结构的表；
+> 开发环境可先备份数据，再删除对应表让应用重建（空表直接删即可）。

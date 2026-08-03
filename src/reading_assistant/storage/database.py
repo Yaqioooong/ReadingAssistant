@@ -5,6 +5,7 @@ from contextlib import contextmanager
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from reading_assistant.config import get_settings
 from reading_assistant.storage.models import Base
@@ -16,6 +17,9 @@ def create_db_engine(database_url: str | None = None) -> Engine:
     kwargs = {}
     if url.startswith('sqlite'):
         kwargs['connect_args'] = {'check_same_thread': False}
+        if url == 'sqlite:///:memory:':
+            # 内存库需要共享同一连接，否则跨线程/多连接各自独立
+            kwargs['poolclass'] = StaticPool
     return create_engine(url, pool_pre_ping=True, **kwargs)
 
 

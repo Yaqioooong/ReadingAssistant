@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from reading_assistant.storage.models import Document
+from reading_assistant.storage.models import Document, HitlTask
 
 
 def get_document(session: Session, document_id: int) -> Document | None:
@@ -43,3 +43,44 @@ def insert_document(session: Session, **fields) -> tuple[Document, bool]:
         if existing is None:
             existing = get_document_by_content_hash(session, fields['content_hash'])
         return existing, False
+
+
+def create_hitl_task(session: Session, session_id: int | None, question: str) -> HitlTask:
+    """创建 HITL 澄清任务（awaiting）。"""
+    task = HitlTask(
+        session_id=session_id,
+        question=question,
+        status=HitlTask.STATUS_AWAITING,
+    )
+    session.add(task)
+    session.flush()
+    return task
+
+
+def get_hitl_task(session: Session, task_id: int) -> HitlTask | None:
+    """按 id 查询 HITL 任务。"""
+    return session.get(HitlTask, task_id)
+
+
+def submit_hitl_clarification(session: Session, task_id: int, clarification: str) -> HitlTask:
+    """提交澄清：awaiting -> approved。"""
+    task = _get_awaiting_task(session, task_id)
+    task.clarification = clarification
+    task.status = HitlTask.STATUS_APPROVED
+    return task
+
+
+def reject_hitl_task(session: Session, task_id: int) -> HitlTask:
+    """拒绝澄清：awaiting -> rejected。"""
+    task = _get_awaiting_task(session, task_id)
+    task.status = HitlTask.STATUS_REJECTED
+    return task
+
+
+def _get_awaiting_task(session: Session, task_id: int) -> HitlTask:
+    task = get_hitl_task(session, task_id)
+    if task is None:
+        raise ValueError(f'HITL 任务不存在: {task_id}')
+    if task.status != HitlTask.STATUS_AWAITING:
+        raise ValueError(f'任务状态不允许变更: {task.status}')
+    return task

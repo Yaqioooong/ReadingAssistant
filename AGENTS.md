@@ -10,8 +10,8 @@ src/reading_assistant/
 ├── parsers/     # done: txt/epub/pdf/docx parsers + factory
 ├── rag/         # done: chunking + retriever
 ├── storage/     # done: models, db session, dedup service, vector store adapters
-├── graph/       # TODO: LangGraph pipelines (ingest, QA with HITL)
-├── api/         # TODO: FastAPI app, routes, request/response schemas
+├── graph/       # done: ingest + QA/HITL graphs, checkpointer factory
+├── api/         # done: FastAPI app, routes (documents/sessions/hitl), schemas
 ├── model/       # done: LLM and embedding factories
 ├── utils/       # done: config, logging, path helpers
 └── config/      # YAML configuration files
@@ -31,7 +31,7 @@ Parsers and storage are designed to be swappable: add a format as a `BookParser`
 
 - `pip install -e ".[dev]"` — install the package and dev dependencies (`pyproject.toml` is the source of truth; `requirements.txt` is a thin `-e .[dev]` alias).
 - `docker compose up -d` — start PostgreSQL for local development.
-- `uvicorn reading_assistant.api.main:app --reload` — run the API locally (planned; `api/main.py` is not implemented).
+- `uvicorn reading_assistant.api.main:app --reload` — run the API locally (see http://127.0.0.1:8000/docs).
 - `cd frontend && npm install && npm run dev` — run the frontend dev server on http://localhost:5173 (proxies `/api` to port 8000).
 - `npm run build` — build the frontend into `frontend/dist`.
 - `pytest` — run the test suite.

@@ -10,8 +10,8 @@
 | P1 解析器 | `parsers/`：epub / pdf / docx / txt | ✅ 已完成 |
 | P2 存储层 | `storage/`：SQLAlchemy 模型 + 向量库适配器 + 分层去重 | ✅ 已完成 |
 | P3 RAG 层 | `rag/`：分块 + 向量检索 | ✅ 已完成 |
-| P4 LangGraph | `graph/`：入库 / 问答 / HITL 流水线 | ⬜ 未开始 |
-| P5 FastAPI | `api/`：路由、schema、前端联调 | ⬜ 未开始 |
+| P4 LangGraph | `graph/`：入库 / 问答 / HITL 流水线 | ✅ 已完成 |
+| P5 FastAPI | `api/`：路由、schema、前端联调 | ✅ 已完成 |
 | P6 CLI | `cli.py`：ingest / ask 命令 | ⬜ 未开始 |
 | P7 收尾 | 全量测试、README 同步、首个 commit / PR | ⬜ 未开始 |
 
@@ -65,23 +65,23 @@
 
 ## P4 LangGraph 流水线（graph）
 
-- [ ] ingest 图：解析 → 分块 → 向量化 → 入库
-- [ ] QA 图：检索 → 信息充足性判断 → 回答 / 进入 HITL
-- [ ] HITL 澄清状态流转（awaiting / approved / rejected）
-- [ ] 通过 checkpoint 将问答记录持久化到 PostgreSQL
+- [x] ingest 图：解析 → 分块 → 向量化 → 入库
+- [x] QA 图：检索 → 信息充足性判断 → 回答 / 进入 HITL
+- [x] HITL 澄清状态流转（awaiting / approved / rejected）
+- [x] 通过 checkpoint 将问答记录持久化到 PostgreSQL
 
 **验收标准：** 入库与问答流程端到端可跑通（LLM 可用 mock 代替）；HITL 分支有测试。
 
 ## P5 FastAPI（api）
 
-- [ ] `main.py` + 路由：
+- [x] `main.py` + 路由：
   - `POST /api/documents/upload`（返回 id、chunk_count）
   - `GET /api/documents`
   - `POST/GET /api/sessions`、`GET /api/sessions/{id}/messages`、`POST /api/sessions/{id}/messages`
   - HITL 澄清相关接口
-- [ ] Pydantic 请求 / 响应模型
-- [ ] 对齐 `frontend/src/api.js` 的现有调用约定
-- [ ] 生产模式静态托管 `frontend/dist`
+- [x] Pydantic 请求 / 响应模型
+- [x] 对齐 `frontend/src/api.js` 的现有调用约定
+- [x] 生产模式静态托管 `frontend/dist`
 
 **验收标准：** 前后端联调通过；接口测试覆盖 happy path 与错误分支。
 

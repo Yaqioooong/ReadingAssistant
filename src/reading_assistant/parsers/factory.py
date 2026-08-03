@@ -1,5 +1,5 @@
 """解析器工厂：按扩展名分发到具体解析器。"""
-import json
+
 from pathlib import Path
 
 from reading_assistant.parsers.base import (
@@ -11,7 +11,6 @@ from reading_assistant.parsers.docx_parser import DocxParser
 from reading_assistant.parsers.epub_parser import EpubParser
 from reading_assistant.parsers.pdf_parser import PdfParser
 from reading_assistant.parsers.txt_parser import TxtParser
-from rich.json import JSON
 
 # 注册顺序即匹配顺序；各解析器的 extensions 互斥
 _REGISTRY: tuple[type[BookParser], ...] = (TxtParser, EpubParser, PdfParser, DocxParser)
@@ -32,5 +31,5 @@ def parse_book(path: str | Path) -> ParsedBook:
 
 
 if __name__ == '__main__':
-    book = parse_book('data/books/sample_book.pdf')
+    book = parse_book('data/books/sample_book.epub')
     print(book)

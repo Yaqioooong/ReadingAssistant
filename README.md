@@ -2,7 +2,7 @@
 
 帮助读者在阅读时建立书中**人物与事件脉络**的智能助手。用户上传电子书（EPUB / PDF / DOCX / TXT），Agent 解析全文并建立索引；之后读者可以用自然语言提问，例如「张三在本书中的事件时间线是怎样的？」「李四为什么被抓？」，Agent 结合原文给出带引用的回答。
 
-> **当前状态：脚手架阶段。** 仓库已搭好目录结构、依赖清单与前端界面，但后端核心模块（解析、向量检索、LangGraph 流水线、API）尚未实现，均为空包 TODO。下文「目标功能」描述的是产品愿景，并非已上线能力。
+> **当前状态：核心链路已完成。** 解析 → 存储 → RAG → LangGraph → FastAPI 已实现并有测试覆盖，前端页面与接口约定已对齐；CLI 与最终联调/收尾（P6 / P7）仍待完成。
 
 ## 目标功能
 
@@ -20,16 +20,17 @@
 - 模型工厂 [`model/factory.py`](src/reading_assistant/model/factory.py)：ChatDeepSeek（`deepseek-v4-flash`）+ DashScope Embedding（`text-embedding-v4`）。
 - 基础工具 `utils/`：YAML 配置加载（`config_handler.py`）、日志封装（`logger_handler.py`）、绝对路径工具（`path_tools.py`）。
 - 配置清单：`requirements.txt`、`.env.example`、`config/*.yml`。
-
-**尚未实现（TODO）：**
-
 - `parsers/`：已实现 txt / epub / pdf / docx 四类解析器与工厂分发。
 - `rag/`：已实现文本分块（chunking）与向量检索器（retriever），检索结果携带文档/章节元数据与引用。
 - `storage/`：已实现 SQLAlchemy 模型、数据库会话管理、分层去重入库服务、向量库适配器（ChromaDB + 内存实现）。
-- `graph/`：无 LangGraph 流水线（入库、问答、HITL）。
-- `api/`：无 FastAPI 应用与路由，前端调用的 `/api/documents`、`/api/sessions` 等接口尚不存在。
-- `tests/`：仅有 P0 冒烟测试（conftest.py / test_smoke.py）。
-- CLI 未落地；PostgreSQL 编排已通过 `docker-compose.yml` 提供。
+- `graph/`：已实现 LangGraph 入库图与问答图（含 HITL 分支），支持内存/PostgreSQL 检查点。
+- `api/`：已实现 FastAPI 应用与路由（文档上传/列表、会话、消息、HITL），对齐前端 `api.js` 调用约定。
+- `tests/`：66 个 pytest 用例覆盖各阶段（smoke / parsers / storage / rag / graph / api）。
+
+**尚未实现（TODO）：**
+
+- CLI（`ingest` / `ask` 命令）未落地。
+- P7 收尾：全量测试复核、README 接口文档、首个 commit / PR。
 
 ## 技术栈
 
@@ -48,8 +49,8 @@
 ```
 .
 ├── src/reading_assistant/
-│   ├── api/          # TODO：FastAPI 应用、路由、请求/响应模型（空包）
-│   ├── graph/        # TODO：LangGraph 流水线：入库、问答 + HITL（空包）
+│   ├── api/          # 已实现：main/app + routes（documents/sessions/hitl）+ schemas
+│   ├── graph/        # 已实现：ingest（入库）+ qa（问答/HITL）+ checkpointer
 │   ├── parsers/      # 已实现：txt / epub / pdf / docx 解析器 + 工厂（*_parser.py 命名）
 │   ├── rag/          # 已实现：chunking（分块）+ retriever（检索）
 │   ├── storage/      # 已实现：模型 / database / repositories / service（去重）/ vector_store
@@ -100,17 +101,23 @@ npm install
 npm run dev
 ```
 
-打开 http://localhost:5173。前端已把 `/api` 代理到 `http://127.0.0.1:8000`，但后端 API 尚未实现，页面当前请求会失败——这是预期行为。
+打开 http://localhost:5173。前端已把 `/api` 代理到 `http://127.0.0.1:8000`，后端接口见下节。
 
-### 4. 启动后端（TODO）
+### 4. 启动后端
 
-后端入口规划为 `reading_assistant.api.main`，对应命令：
+先启动 PostgreSQL（可选，仅聊天记录/检查点需要）：
+
+```bash
+docker compose up -d
+```
+
+然后启动 API：
 
 ```bash
 uvicorn reading_assistant.api.main:app --reload
 ```
 
-该模块目前不存在，待 `api/` 实现后可用。PostgreSQL 建库步骤见 [Quick_Start.md](Quick_Start.md)。
+接口文档见 http://127.0.0.1:8000/docs（Swagger UI）。PostgreSQL 建库步骤见 [Quick_Start.md](Quick_Start.md)。
 
 ## 配置说明
 
@@ -154,7 +161,7 @@ uvicorn reading_assistant.api.main:app --reload
 - **聊天问答**：新建 / 切换会话，调用 `/api/sessions` 系列接口提问并展示回答；信息不足时展示澄清提示，历史消息可回溯。
 
 开发模式：`cd frontend && npm run dev`（http://localhost:5173，热更新）。
-生产模式：`npm run build` 生成 `frontend/dist`，规划由后端静态托管（尚未实现）。
+生产模式：`npm run build` 生成 `frontend/dist`，后端检测到后自动托管，直接访问 http://127.0.0.1:8000 即可。
 
 ## Roadmap
 
@@ -163,7 +170,7 @@ uvicorn reading_assistant.api.main:app --reload
 1. ✅ **统一配置层**：新增 `config.py`（pydantic-settings），收敛 `.env` 与 YAML，修复 `utils` 的扁平导入与路径工具问题。
 2. ✅ **parsers**：实现 epub / pdf / docx / txt 解析器与工厂注册。
 3. ✅ **storage**：SQLAlchemy 模型 + 向量库适配器（ChromaDB / 内存）。
-4. **graph**：LangGraph 入库与问答流水线，含 HITL 状态。
-5. **api**：FastAPI 路由，对齐前端已有调用约定；同步实现 CLI。
+4. ✅ **graph**：LangGraph 入库与问答流水线，含 HITL 状态。
+5. ✅ **api**：FastAPI 路由，对齐前端已有调用约定；同步实现 CLI。
 6. **tests**：补齐 pytest 单测与集成测试。
 7. **远期**：引用解析、时间线结构化抽取、本地 Embedding / LLM、更多格式（.doc / mobi / html）、用户认证与多租户隔离。

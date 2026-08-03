@@ -45,7 +45,7 @@ class DocumentService:
     def __init__(self, session: Session):
         self._session = session
 
-    def add_book(self, path: str | Path) -> AddBookResult:
+    def add_book(self, path: str | Path, filename: str | None = None) -> AddBookResult:
         path = resolve_book_path(path)
         try:
             raw = path.read_bytes()
@@ -70,7 +70,7 @@ class DocumentService:
         # 第 3 层：插入；并发冲突由唯一索引兜底
         document, inserted = insert_document(
             self._session,
-            filename=path.name,
+            filename=filename or path.name,
             title=parsed.title,
             author=parsed.author,
             file_path=str(path),
