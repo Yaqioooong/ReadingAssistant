@@ -84,8 +84,12 @@ dependencies = [
 dev = [
     "jupyter",
     "pytest==9.0.3",
+    "pytest-cov",
     "ruff",
 ]
+
+[project.scripts]
+readingassistant = "reading_assistant.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -110,3 +114,10 @@ markers = [
     "postgres: 需要 PostgreSQL 的集成测试",
     "llm: 需要真实 LLM/Embedding 密钥的测试",
 ]
+
+[tool.coverage.run]
+source = ["reading_assistant"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true

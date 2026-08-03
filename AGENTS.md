@@ -12,10 +12,11 @@ src/reading_assistant/
 ├── storage/     # done: models, db session, dedup service, vector store adapters
 ├── graph/       # done: ingest + QA/HITL graphs, checkpointer factory
 ├── api/         # done: FastAPI app, routes (documents/sessions/hitl), schemas
+├── cli.py       # done: ingest / ask commands
 ├── model/       # done: LLM and embedding factories
 ├── utils/       # done: config, logging, path helpers
 └── config/      # YAML configuration files
-tests/           # pytest tests (smoke + parsers)
+tests/           # pytest suite (74 cases, ~94% coverage)
 frontend/        # Vite + Vue 3 single-page app
 docker-compose.yml  # PostgreSQL 16
 ```

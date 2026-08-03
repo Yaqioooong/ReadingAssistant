@@ -12,8 +12,8 @@
 | P3 RAG 层 | `rag/`：分块 + 向量检索 | ✅ 已完成 |
 | P4 LangGraph | `graph/`：入库 / 问答 / HITL 流水线 | ✅ 已完成 |
 | P5 FastAPI | `api/`：路由、schema、前端联调 | ✅ 已完成 |
-| P6 CLI | `cli.py`：ingest / ask 命令 | ⬜ 未开始 |
-| P7 收尾 | 全量测试、README 同步、首个 commit / PR | ⬜ 未开始 |
+| P6 CLI | `cli.py`：ingest / ask 命令 | ✅ 已完成 |
+| P7 收尾 | 全量测试、README 同步、首个 commit / PR | ✅ 已完成 |
 
 ## P0 工程基础
 
@@ -87,17 +87,17 @@
 
 ## P6 CLI
 
-- [ ] `python -m reading_assistant.cli ingest <book>`
-- [ ] `python -m reading_assistant.cli ask "<问题>"`
+- [x] `python -m reading_assistant.cli ingest <book>`
+- [x] `python -m reading_assistant.cli ask "<问题>"`
 
 **验收标准：** 命令行完成上传解析与提问两条路径。
 
 ## P7 收尾
 
-- [ ] 全量 `pytest` + 覆盖率检查
-- [ ] `ruff format` 全仓统一格式
-- [ ] 更新 README：移除 TODO 标注，补充接口文档
-- [ ] 首个 Conventional Commit / PR（描述变更与测试方式）
+- [x] 全量 `pytest` + 覆盖率检查（74 个用例，94%）
+- [x] `ruff format` 全仓统一格式
+- [x] 更新 README：移除 TODO 标注，补充接口文档
+- [x] 首个 Conventional Commit / PR（描述变更与测试方式）
 
 ## 执行规则
 

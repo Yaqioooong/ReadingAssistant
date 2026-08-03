@@ -2,7 +2,7 @@
 
 帮助读者在阅读时建立书中**人物与事件脉络**的智能助手。用户上传电子书（EPUB / PDF / DOCX / TXT），Agent 解析全文并建立索引；之后读者可以用自然语言提问，例如「张三在本书中的事件时间线是怎样的？」「李四为什么被抓？」，Agent 结合原文给出带引用的回答。
 
-> **当前状态：核心链路已完成。** 解析 → 存储 → RAG → LangGraph → FastAPI 已实现并有测试覆盖，前端页面与接口约定已对齐；CLI 与最终联调/收尾（P6 / P7）仍待完成。
+> **当前状态：P0–P7 已完成。** 解析 → 存储 → RAG → LangGraph → FastAPI → CLI 全链路已实现，74 个 pytest 用例（覆盖率 94%），前端页面与接口约定已对齐。远期能力见文末 Roadmap。
 
 ## 目标功能
 
@@ -25,24 +25,20 @@
 - `storage/`：已实现 SQLAlchemy 模型、数据库会话管理、分层去重入库服务、向量库适配器（ChromaDB + 内存实现）。
 - `graph/`：已实现 LangGraph 入库图与问答图（含 HITL 分支），支持内存/PostgreSQL 检查点。
 - `api/`：已实现 FastAPI 应用与路由（文档上传/列表、会话、消息、HITL），对齐前端 `api.js` 调用约定。
-- `tests/`：66 个 pytest 用例覆盖各阶段（smoke / parsers / storage / rag / graph / api）。
-
-**尚未实现（TODO）：**
-
-- CLI（`ingest` / `ask` 命令）未落地。
-- P7 收尾：全量测试复核、README 接口文档、首个 commit / PR。
+- `cli.py`：命令行 `ingest` / `ask`。
+- `tests/`：74 个 pytest 用例，覆盖率 94%（smoke / parsers / storage / rag / graph / api / cli）。
 
 ## 技术栈
 
 | 层 | 选型 |
 | --- | --- |
 | 前端 | Vue 3 + Vite（开发端口 5173，`/api` 代理到 8000） |
-| 后端 | FastAPI + uvicorn（规划中） |
+| 后端 | FastAPI + uvicorn |
 | 编排 | LangGraph + langgraph-checkpoint-postgres |
 | LLM | DeepSeek `deepseek-v4-flash`（langchain-deepseek） |
 | Embedding | 阿里云百炼 DashScope `text-embedding-v4`（langchain-community） |
-| 结构化存储 | PostgreSQL（psycopg / SQLAlchemy，规划中） |
-| 向量存储 | 配置指向 ChromaDB（`config/chroma.yml`），但依赖清单中是 Milvus 适配器（langchain-milvus / pymilvus），落地前需二选一并补齐对应依赖 |
+| 结构化存储 | PostgreSQL（psycopg / SQLAlchemy） |
+| 向量存储 | ChromaDB（本地持久化）；内存实现用于测试 |
 
 ## 目录结构
 
@@ -54,6 +50,7 @@
 │   ├── parsers/      # 已实现：txt / epub / pdf / docx 解析器 + 工厂（*_parser.py 命名）
 │   ├── rag/          # 已实现：chunking（分块）+ retriever（检索）
 │   ├── storage/      # 已实现：模型 / database / repositories / service（去重）/ vector_store
+│   ├── cli.py        # 已实现：ingest / ask 命令
 │   ├── config.py             # 已实现：pydantic-settings 统一配置（.env + YAML）
 │   ├── model/
 │   │   └── factory.py        # 已实现：DeepSeek 对话模型 + DashScope Embedding 工厂
@@ -62,7 +59,8 @@
 │   │   ├── logger_handler.py # 已实现：控制台 + 文件日志
 │   │   └── path_tools.py     # 已实现：项目根目录 / 绝对路径
 │   └── config/       # agent.yml / chroma.yml / model.yml / prompt.yml
-├── tests/            # 冒烟测试 + 解析器测试（test_smoke.py / test_parsers.py）
+├── tests/            # 74 个 pytest 用例（覆盖各模块与 API/CLI）
+├── data/books/       # 测试样例电子书（txt/epub/pdf/docx + 去重副本）
 ├── frontend/         # Vite + Vue 3 单页应用（上传解析 + 聊天问答）
 ├── requirements.txt  # 开发安装别名（-e .[dev]）
 ├── pyproject.toml    # 依赖清单与 ruff / pytest 配置
@@ -119,6 +117,29 @@ uvicorn reading_assistant.api.main:app --reload
 
 接口文档见 http://127.0.0.1:8000/docs（Swagger UI）。PostgreSQL 建库步骤见 [Quick_Start.md](Quick_Start.md)。
 
+### 5. 使用命令行（可选）
+
+```bash
+python -m reading_assistant.cli ingest data/books/sample_book.txt
+python -m reading_assistant.cli ask "罗辑在本书中的事件时间线是怎样的？"
+```
+
+安装后也可直接使用 `readingassistant ingest ...` / `readingassistant ask ...`。
+
+## API 接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/documents/upload` | 上传电子书（multipart `file`），返回 `{id, filename, title, author, chunk_count, duplicate}` |
+| `GET` | `/api/documents` | 已入库文档列表 |
+| `POST` | `/api/sessions` | 创建会话，返回 `{session_id}` |
+| `GET` | `/api/sessions` | 会话列表 |
+| `GET` | `/api/sessions/{id}/messages` | 会话聊天记录 |
+| `POST` | `/api/sessions/{id}/messages` | 提问，body `{question, document_ids?, clarification?}`，返回 `{answer, citations, needs_clarification, hitl_task_id}` |
+| `GET` | `/api/hitl/tasks` | HITL 澄清任务（可按 `session_id` 过滤） |
+| `POST` | `/api/hitl/tasks/{id}/submit` | 提交澄清，body `{clarification}` |
+| `POST` | `/api/hitl/tasks/{id}/reject` | 拒绝澄清 |
+
 ## 配置说明
 
 配置分两层：
@@ -172,5 +193,5 @@ uvicorn reading_assistant.api.main:app --reload
 3. ✅ **storage**：SQLAlchemy 模型 + 向量库适配器（ChromaDB / 内存）。
 4. ✅ **graph**：LangGraph 入库与问答流水线，含 HITL 状态。
 5. ✅ **api**：FastAPI 路由，对齐前端已有调用约定；同步实现 CLI。
-6. **tests**：补齐 pytest 单测与集成测试。
+6. ✅ **tests**：补齐 pytest 单测与集成测试（74 个用例，覆盖率 94%）。
 7. **远期**：引用解析、时间线结构化抽取、本地 Embedding / LLM、更多格式（.doc / mobi / html）、用户认证与多租户隔离。
