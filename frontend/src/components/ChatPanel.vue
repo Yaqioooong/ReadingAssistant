@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, nextTick, onMounted } from 'vue'
+import { ref, computed, nextTick, watch, onMounted, onActivated } from 'vue'
 import {
   createSession,
   listSessions,
@@ -19,6 +19,7 @@ const question = ref('')
 const filterDoc = ref('')
 const sending = ref(false)
 const messageBox = ref(null)
+const stickToBottom = ref(true)
 
 const currentTitle = computed(() => {
   const session = sessions.value.find((item) => item.id === currentSessionId.value)
@@ -58,6 +59,7 @@ async function selectSession(id) {
       content: m.content,
       citations: m.meta?.citations || [],
     }))
+    scrollToBottom()
   } catch (err) {
     messages.value = [{ role: 'system', content: `出错：${err.message}` }]
   }
@@ -75,6 +77,7 @@ async function send() {
     }
     messages.value.push({ role: 'user', content: text })
     question.value = ''
+    scrollToBottom()
     const documentIds = filterDoc.value ? [filterDoc.value] : []
     const resp = await sendMessage(currentSessionId.value, {
       question: text,
@@ -106,9 +109,23 @@ function citationSource(c) {
 
 async function scrollToBottom() {
   await nextTick()
-  if (messageBox.value) messageBox.value.scrollTop = messageBox.value.scrollHeight
+  requestAnimationFrame(() => {
+    const el = messageBox.value
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+  })
 }
 
+function onMessagesScroll() {
+  const el = messageBox.value
+  if (!el) return
+  stickToBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+}
+
+watch(messages, () => {
+  if (stickToBottom.value) scrollToBottom()
+}, { deep: true })
+
+onActivated(scrollToBottom)
 onMounted(loadSessions)
 </script>
 
@@ -153,7 +170,7 @@ onMounted(loadSessions)
         </div>
       </header>
 
-      <div ref="messageBox" class="messages">
+      <div ref="messageBox" class="messages" @scroll="onMessagesScroll">
         <div class="messages-inner">
           <div v-if="!messages.length" class="empty-state">
             <div class="empty-icon">💬</div>
@@ -171,6 +188,16 @@ onMounted(loadSessions)
                     <div class="excerpt">{{ c.excerpt }}</div>
                   </div>
                 </div>
+              </div>
+            </div>
+          </div>
+          <div v-if="sending" class="msg assistant">
+            <div class="msg-inner">
+              <div class="msg-body typing">
+                <span class="typing-text">思考中</span>
+                <span class="dot"></span>
+                <span class="dot"></span>
+                <span class="dot"></span>
               </div>
             </div>
           </div>
