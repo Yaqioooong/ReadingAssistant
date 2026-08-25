@@ -24,4 +24,5 @@ def get_abs_path(relative_path: str) -> str:
 
 
 if __name__ == '__main__':
-    print(get_abs_path('sample_book.txt'))
+    print(__name__)
+    # print(get_abs_path('sample_book.txt'))

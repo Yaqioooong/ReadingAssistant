@@ -70,6 +70,8 @@
 └── README.md
 ```
 
+> 📚 想了解项目是怎么一步步开发出来的？见 [tutorial/](tutorial/README.md) 分章节开发教程（面向 agent 开发新人）。
+
 > 说明：早期文档与 AGENTS.md 中写的是 `reading_agent`，实际包名为 `reading_assistant`，请以后者为准。
 
 ## 快速开始
