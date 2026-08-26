@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     api_port: int = 8000
     log_level: str = 'INFO'
 
+    # --- QA 缓存 ---
+    cache_enabled: bool = True # 是否启用缓存
+    cache_ttl_days: int = 30 # 缓存天数
+    cache_max_entries: int = 10000 # 最大缓存键数
+
     @property
     def chroma_persist_path(self) -> Path:
         """向量库持久化目录（仓库根目录下）。"""

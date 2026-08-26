@@ -1,5 +1,6 @@
 """FastAPI 应用工厂：测试可注入 mock 依赖。"""
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -13,6 +14,7 @@ from reading_assistant.api.deps import (
     get_vector_store,
 )
 from reading_assistant.api.routes import documents, hitl, sessions
+from reading_assistant.storage import create_db_engine, init_db
 from reading_assistant.utils.path_tools import get_abs_path
 
 
@@ -24,7 +26,14 @@ def create_app(
     upload_dir: Path | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用；不传参时使用生产组件。"""
-    app = FastAPI(title='ReadingAssistant API', version='0.1.0')
+    @asynccontextmanager
+    async def lifespan(_: FastAPI):
+        # 生产模式（未注入 session_factory）时确保表结构存在；
+        # 测试注入 sqlite 工厂时不碰生产库
+        if session_factory is None:
+            init_db(create_db_engine())
+        yield
+    app = FastAPI(title='ReadingAssistant API', version='0.1.0', lifespan=lifespan)
     if session_factory is not None:
         app.dependency_overrides[get_session_factory] = lambda: session_factory
     if vector_store is not None:

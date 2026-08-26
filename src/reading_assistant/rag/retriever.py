@@ -1,11 +1,13 @@
 """检索器：Embedding + 向量库 top-k 检索。"""
 
+from collections import OrderedDict
 from dataclasses import dataclass
 
 from langchain_core.embeddings import Embeddings
 
 from reading_assistant.config import get_settings
 from reading_assistant.model.factory import get_embedding_model
+from reading_assistant.storage import normalize_question, sha256_hex
 from reading_assistant.storage.vector_store import VectorStore
 
 
@@ -35,6 +37,10 @@ class Retriever:
     def __init__(self, vector_store: VectorStore, embedding_model: Embeddings | None = None):
         self._vector_store = vector_store
         self._embedding_model = embedding_model or get_embedding_model()
+        settings = get_settings()
+        self._embed_cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._embed_cache_enabled = settings.cache_enabled
+        self._embed_cache_max = settings.cache_max_entries
 
     def retrieve(
         self,
@@ -45,7 +51,7 @@ class Retriever:
         """检索与 query 最相关的 top-k 片段。"""
         settings = get_settings()
         k = top_k or settings.top_k
-        embedding = self._embedding_model.embed_query(query)
+        embedding = self._embed(query)
         where = {'document_id': document_id} if document_id is not None else None
         hits = self._vector_store.query(embedding, top_k=k, where=where)
         return [
@@ -59,3 +65,20 @@ class Retriever:
             )
             for hit in hits
         ]
+
+    def _embed(self, query: str) -> list[float]:
+        """L1 embedding缓存：归一化query命中则复用向量，跳过付费API
+        对归一化文本做embedding, 保证缓存键与向量式中一致
+        """
+
+        if not self._embed_cache_enabled:
+            return self._embedding_model.embed_query(query)
+        key = sha256_hex(normalize_question(query))
+        if key in self._embed_cache:
+            self._embed_cache.move_to_end(key)  # LRU语义
+            return self._embed_cache[key]
+        vector = self._embedding_model.embed_query(normalize_question(query))
+        self._embed_cache[key] = vector
+        if len(self._embed_cache) > self._embed_cache_max:
+            self._embed_cache.popitem(last=False)  # 淘汰最久未使用的key
+        return vector

@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -80,3 +80,22 @@ class HitlTask(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
     )
+
+
+class QaCacheEntry(Base):
+    """问答结果缓存：命中后跳过LLM/Embedding调用"""
+
+    __tablename__ = 'qa_cache'
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    question_raw: Mapped[str] = mapped_column(Text, nullable=False)
+    question_normalized: Mapped[str] = mapped_column(Text, nullable=False)
+    question_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    question_embedding: Mapped[list] = mapped_column(JSON)
+    answer: Mapped[str | None] = mapped_column(Text)
+    citations: Mapped[list] = mapped_column(JSON, default=list)
+    needs_clarification: Mapped[bool] = mapped_column(Boolean, default=False)
+    document_id: Mapped[int | None] = mapped_column(ForeignKey('documents.id'), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    hit_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    last_hit_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

@@ -6,21 +6,33 @@ from reading_assistant.storage.database import (
     init_db,
     session_scope,
 )
-from reading_assistant.storage.models import Base, ChatMessage, ChatSession, Document, HitlTask
+from reading_assistant.storage.models import (
+    Base,
+    ChatMessage,
+    ChatSession,
+    Document,
+    HitlTask,
+    QaCacheEntry,
+)
 from reading_assistant.storage.repositories import (
     create_hitl_task,
     get_document,
     get_document_by_content_hash,
     get_document_by_file_hash,
     get_hitl_task,
+    get_qa_cache_entry,
     insert_document,
     list_documents,
+    prune_qa_cache,
     reject_hitl_task,
+    save_qa_cache_entry,
     submit_hitl_clarification,
+    touch_qa_cache_hit,
 )
 from reading_assistant.storage.service import (
     AddBookResult,
     DocumentService,
+    normalize_question,
     normalize_text,
     sha256_hex,
 )
@@ -40,6 +52,7 @@ __all__ = [
     'ChatSession',
     'ChromaVectorStore',
     'Document',
+    'QaCacheEntry',
     'DocumentService',
     'HitlTask',
     'InMemoryVectorStore',
@@ -54,10 +67,15 @@ __all__ = [
     'get_document_by_content_hash',
     'get_document_by_file_hash',
     'get_hitl_task',
+    'get_qa_cache_entry',
+    'save_qa_cache_entry',
+    'touch_qa_cache_hit',
+    'prune_qa_cache',
     'init_db',
     'insert_document',
     'list_documents',
     'normalize_text',
+    'normalize_question',
     'reject_hitl_task',
     'session_scope',
     'sha256_hex',

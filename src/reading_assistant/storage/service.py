@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +17,14 @@ from reading_assistant.storage.repositories import (
 )
 
 _WHITESPACE_RE = re.compile(r'\s+')
+
+_PUNCT_RE = re.compile(r'[\s\u3000\-_~.,!?;:，。！？；：、（）()《》〈〉【】\[\]“”‘’""\'\']+')
+
+
+def normalize_question(text: str) -> str:
+    """归一化问题文本: NFKC、小写、去空白与标点（用于精确缓存键）"""
+    text = unicodedata.normalize('NFKC', text or '').strip().lower()
+    return _PUNCT_RE.sub('', text)
 
 
 def normalize_text(text: str) -> str:
