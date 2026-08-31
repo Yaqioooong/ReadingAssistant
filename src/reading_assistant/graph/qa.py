@@ -1,11 +1,13 @@
 """问答流水线：检索 → 充足性判断 → 回答 / HITL 澄清 → 记录。"""
 
+import math
 from datetime import datetime, timedelta, timezone
 from typing import TypedDict
 
 from langchain_core.embeddings import Embeddings
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from nbconvert.filters import citation
 from sqlalchemy.orm import Session, sessionmaker
 
 from reading_assistant.config import get_settings
@@ -16,6 +18,7 @@ from reading_assistant.storage import (
     create_hitl_task,
     get_document,
     get_qa_cache_entry,
+    list_qa_cache_entries,
     normalize_question,
     prune_qa_cache,
     save_qa_cache_entry,
@@ -40,6 +43,7 @@ class QAState(TypedDict, total=False):
     citations: list[dict]
     cache_hit: bool
     question_hash: str | None
+    question_embedding: list[float] | None
 
 
 def _chunk_to_dict(chunk) -> dict:
@@ -95,6 +99,25 @@ def _document_content_hash(session: Session, document_id: int | None) -> str:
     return document.content_hash if document else ''
 
 
+def _full_question_text(question: str, clarification: str | None) -> str:
+    """租种与retrieve节点一致的完整问题文本（含补充说明）"""
+    if clarification:
+        return f'{question}\n补充说明：{clarification}'
+    return question
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    """余弦相似度；向量缺失/长度不一致/零向量时返回 0"""
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    norm_a = math.sqrt(sum(x * x for x in a))
+    norm_b = math.sqrt(sum(y * y for y in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
 def build_qa_graph(
     session_factory: sessionmaker[Session],
     vector_store: VectorStore,
@@ -123,6 +146,42 @@ def build_qa_graph(
             content_hash = _document_content_hash(session, doc_id)
             entry = get_qa_cache_entry(session, question_hash, content_hash, doc_id)
             if entry is None:
+                # 精确未命中 -> 语义层：同文档内余弦相似度匹配
+                if settings.cache_similarity_threshold > 0:
+                    embedding = retriever.embed(
+                        _full_question_text(state['question'], state.get('clarification')),
+                    )
+                    best_entry, best_score = None, 0.0
+                    for cand in list_qa_cache_entries(session, content_hash, doc_id):
+                        score = _cosine_similarity(embedding, cand.question_embedding or [])
+                        if score > best_score:
+                            best_score, best_entry = score, cand
+                    if best_entry is not None and best_score >= settings.cache_similarity_threshold:
+                        if _is_cache_expired(best_entry, settings.cache_ttl_days):
+                            session.delete(best_entry)
+                            return {
+                                'cache_hit': False,
+                                'question_hash': question_hash,
+                                'question_embedding': embedding,
+                            }
+                        touch_qa_cache_hit(session, best_entry)
+                        # 必须在commit之前取值（DetachedInstanceError）
+                        answer = best_entry.answer
+                        citations = list(best_entry.citations or [])
+                        needs_clarification = best_entry.needs_clarification
+                        return {
+                            'cache_hit': True,
+                            'question_hash': question_hash,
+                            'question_embedding': embedding,
+                            'answer': answer,
+                            'citations': citations,
+                            'needs_clarification': needs_clarification,
+                        }
+                    return {
+                        'cache_hit': False,
+                        'question_hash': question_hash,
+                        'question_embedding': embedding,
+                    }
                 return {'cache_hit': False, 'question_hash': question_hash}
             if _is_cache_expired(entry, settings.cache_ttl_days):
                 session.delete(entry)
@@ -169,6 +228,7 @@ def build_qa_graph(
                     needs_clarification=True,
                     document_id=doc_id,
                     content_hash=_document_content_hash(session, doc_id),
+                    question_embedding=state.get('question_embedding'),
                 )
                 prune_qa_cache(session, settings.cache_max_entries)
             return {'hitl_task_id': task.id}
@@ -203,6 +263,7 @@ def build_qa_graph(
                     citations=citations,
                     document_id=doc_id,
                     content_hash=_document_content_hash(session, doc_id),
+                    question_embedding=state.get('question_embedding'),
                 )
                 prune_qa_cache(session, settings.cache_max_entries)
         return {'answer': content, 'citations': citations}

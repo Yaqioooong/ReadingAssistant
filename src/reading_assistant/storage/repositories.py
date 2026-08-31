@@ -162,3 +162,22 @@ def prune_qa_cache(session: Session, max_entries: int) -> None:
     )
     for entry in stale:
         session.delete(entry)
+
+def list_qa_cache_entries(
+        session: Session,
+        content_hash: str,
+        document_id: int | None = None,
+        limit: int = 200
+) -> list[QaCacheEntry]:
+    """语义匹配候选：同文档版本范围内，最近命中的缓存条目（上限200条）"""
+    stmt = (
+        select(QaCacheEntry)
+        .where(QaCacheEntry.content_hash == content_hash)
+        .order_by(QaCacheEntry.last_hit_at.desc())
+        .limit(limit)
+    )
+    if document_id is None:
+        stmt = stmt.where(QaCacheEntry.document_id.is_(None))
+    else:
+        stmt = stmt.where(QaCacheEntry.document_id == document_id)
+    return list(session.scalars(stmt))

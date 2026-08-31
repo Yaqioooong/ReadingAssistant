@@ -66,6 +66,10 @@ class Retriever:
             for hit in hits
         ]
 
+    def embed(self, query: str) -> list[float]:
+        """公开的embedding接口，带L1缓存，供问答图语义缓存使用"""
+        return self._embed(query)
+
     def _embed(self, query: str) -> list[float]:
         """L1 embedding缓存：归一化query命中则复用向量，跳过付费API
         对归一化文本做embedding, 保证缓存键与向量式中一致
