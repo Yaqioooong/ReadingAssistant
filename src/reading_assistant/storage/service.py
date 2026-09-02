@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+import time
 import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,9 @@ from reading_assistant.storage.repositories import (
     get_document_by_file_hash,
     insert_document,
 )
+from reading_assistant.utils.logger_handler import get_logger
+
+logger = get_logger('storage')
 
 _WHITESPACE_RE = re.compile(r'\s+')
 
@@ -68,7 +72,10 @@ class DocumentService:
             return AddBookResult(document=existing, duplicate=True)
 
         # 未命中才解析
+        start = time.perf_counter()
         parsed = parse_book(path)
+        logger.info('存储[add_book] 解析完成 file=%s chapters=%d (%.0fms)', path,
+                    len(parsed.chapters), (time.perf_counter() - start) * 1000)
 
         # 第 2 层：归一化内容哈希（同一本书的不同文件）
         content_hash = sha256_hex(normalize_text(parsed.full_text))

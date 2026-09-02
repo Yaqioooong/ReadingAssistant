@@ -19,8 +19,10 @@ from reading_assistant.graph import build_ingest_graph
 from reading_assistant.parsers import ParseError, UnsupportedFormatError, get_parser
 from reading_assistant.storage import VectorStore, get_document
 from reading_assistant.storage import list_documents as list_document_rows
+from reading_assistant.utils.logger_handler import get_logger
 
 router = APIRouter(prefix='/api/documents', tags=['documents'])
+logger = get_logger('api')
 
 
 @router.get('', response_model=list[schemas.DocumentOut])
@@ -45,9 +47,13 @@ def upload_document(
     except UnsupportedFormatError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    import time
+
     upload_dir.mkdir(parents=True, exist_ok=True)
     target = upload_dir / f'{uuid4().hex}_{filename}'
     target.write_bytes(file.file.read())
+    logger.info('上传开始 filename=%s size=%d', filename, target.stat().st_size)
+    start = time.perf_counter()
     try:
         graph = build_ingest_graph(session_factory, vector_store, embedding_model=embedding_model)
         result = graph.invoke(
@@ -57,7 +63,10 @@ def upload_document(
     except ParseError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    cost_ms = (time.perf_counter() - start) * 1000
     document = get_document(session, result['document_id'])
+    logger.info('上传完成 filename=%s doc=%s chunk=%s dup=%s (%.0fms)', filename,
+                document.id, document.chunk_count, result['duplicate'], cost_ms)
     return schemas.UploadResponse(
         id=document.id,
         filename=document.filename,
@@ -84,11 +93,17 @@ def reindex_document(
     if not document.file_path or not Path(document.file_path).exists():
         raise HTTPException(status_code=409, detail='sourcefile not found, cannot reindex')
 
+    import time
+
+    logger.info('重建索引开始 doc=%s file=%s', document_id, document.file_path)
+    start = time.perf_counter()
     graph = build_ingest_graph(session_factory, vector_store, embedding_model=embedding_model)
     result = graph.invoke(
         {'book_path': document.file_path, 'force': True},
         config={'configurable': {'thread_id': f'{document_id}-{uuid4().hex}'}},
     )
+    logger.info('重建索引完成 doc=%s (%.0fms)', document_id,
+                (time.perf_counter() - start) * 1000)
 
     refreshed = get_document(session, document_id)
     return schemas.UploadResponse(

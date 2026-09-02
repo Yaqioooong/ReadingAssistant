@@ -16,6 +16,10 @@ from reading_assistant.api.deps import (
 )
 from reading_assistant.graph import build_qa_graph
 from reading_assistant.storage import ChatMessage, ChatSession, delete_session
+from reading_assistant.utils.logger_handler import get_logger
+
+
+logger = get_logger('api')
 from reading_assistant.storage.vector_store import VectorStore
 
 router = APIRouter(prefix='/api/sessions', tags=['sessions'])
@@ -32,6 +36,7 @@ def create_session(session: Session = Depends(get_db_session)):
     chat = ChatSession()
     session.add(chat)
     session.flush()
+    logger.info('创建会话 session_id=%s', chat.id)
     return schemas.SessionCreated(session_id=str(chat.id))
 
 
@@ -63,7 +68,9 @@ def delete_chat_session(
 ) -> None:
     """删除会话及其全部消息与 HITL 任务。"""
     if not delete_session(session, session_id):
+        logger.warning('删除会话失败，会话不存在 session_id=%s', session_id)
         raise HTTPException(status_code=404, detail=f'会话不存在: {session_id}')
+    logger.info('删除会话 session_id=%s', session_id)
 
 
 @router.post('/{session_id}/messages', response_model=schemas.AskResponse)
@@ -77,8 +84,12 @@ def ask_question(
     session: Session = Depends(get_db_session),
 ):
     """提问：运行问答流水线并记录消息；信息不足时创建 HITL 任务。"""
+    import time
+
     _ensure_session(session, session_id)
     document_id = payload.document_ids[0] if payload.document_ids else None
+    logger.info('提问 session_id=%s doc=%s q=%.40s', session_id, document_id, payload.question)
+    start = time.perf_counter()
     graph = build_qa_graph(
         session_factory,
         vector_store,
@@ -94,6 +105,9 @@ def ask_question(
         },
         config={'configurable': {'thread_id': f'qa-{uuid4().hex}'}},
     )
+    cost_ms = (time.perf_counter() - start) * 1000
+    logger.info('提问完成 session_id=%s (%.0fms) hit=%s cit=%d', session_id, cost_ms,
+                result.get('cache_hit', False), len(result.get('citations') or []))
     return schemas.AskResponse(
         answer=result.get('answer'),
         citations=result.get('citations') or [],

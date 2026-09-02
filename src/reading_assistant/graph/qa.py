@@ -7,7 +7,6 @@ from typing import TypedDict
 from langchain_core.embeddings import Embeddings
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from nbconvert.filters import citation
 from sqlalchemy.orm import Session, sessionmaker
 
 from reading_assistant.config import get_settings
@@ -27,7 +26,9 @@ from reading_assistant.storage import (
     touch_qa_cache_hit,
 )
 from reading_assistant.storage.vector_store import VectorStore
+from reading_assistant.utils.logger_handler import get_logger
 
+logger = get_logger('qa')
 
 class QAState(TypedDict, total=False):
     """问答图的共享状态。"""
@@ -201,6 +202,7 @@ def build_qa_graph(
             citations = list(entry.citations or [])
             needs_clarification = entry.needs_clarification
 
+        logger.info('问答[缓存] 精确命中 q=%.30s', state['question'])
         return {
             'cache_hit': True,
             'question_hash': question_hash,
@@ -214,6 +216,8 @@ def build_qa_graph(
         if state.get('clarification'):
             question = f'{question}\n补充说明：{state["clarification"]}'
         hits = retriever.retrieve(question, document_id=state.get('document_id'))
+        logger.info('问答[检索] q=%.30s doc=%s hit=%d', question,
+                    state.get('document_id'), len(hits))
         return {'chunks': [_chunk_to_dict(hit) for hit in hits]}
 
     def judge(state: QAState) -> dict:
@@ -222,6 +226,7 @@ def build_qa_graph(
         return {'needs_clarification': needs}
 
     def create_hitl(state: QAState) -> dict:
+        logger.info('问答[HITL] 信息不足，进入澄清流程 q=%.30s', state['question'])
         with session_scope(session_factory) as session:
             task = create_hitl_task(
                 session, session_id=state.get('session_id'), question=state['question']
@@ -244,13 +249,18 @@ def build_qa_graph(
             return {'hitl_task_id': task.id}
 
     def answer(state: QAState) -> dict:
+        import time
+
         prompt = _build_answer_prompt(
             question=state['question'],
             chunks=state.get('chunks') or [],
             clarification=state.get('clarification'),
         )
+        start = time.perf_counter()
         response = chat_model.invoke(prompt)
         content = response.content if hasattr(response, 'content') else str(response)
+        logger.info('问答[answer] LLM 返回 len=%d (%.0fms) q=%.30s', len(content),
+                    (time.perf_counter() - start) * 1000, state['question'])
         citations = [
             {
                 'chunk_id': chunk['chunk_id'],

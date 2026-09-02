@@ -17,6 +17,9 @@ from reading_assistant.storage import (
     update_document_index_status,
 )
 from reading_assistant.storage.vector_store import StoredChunk, VectorStore
+from reading_assistant.utils.logger_handler import get_logger
+
+logger = get_logger('ingest')
 
 
 class IngestState(TypedDict, total=False):
@@ -55,6 +58,9 @@ def build_ingest_graph(
                 # reindex：file_hash 命中时 add_book 不重新解析，手动补上章节内容
                 result.parsed = parse_book(state['book_path'])
             result.document.index_status = 'indexing'
+            logger.info('入库[add_book] doc=%s file=%s dup=%s force=%s',
+                        result.document.id, state['book_path'], result.duplicate,
+                        bool(state.get('force')))
             return {
                 'document_id': result.document.id,
                 'duplicate': result.duplicate,
@@ -99,9 +105,12 @@ def build_ingest_graph(
                 document.chunk_count = len(chunks)
                 document.index_status = 'indexed'
         except Exception:
+            logger.exception('入库[chunk_and_index] 失败 doc=%s', document_id)
             with session_scope(session_factory) as session:
                 update_document_index_status(session, document_id, 'failed')
             raise
+        logger.info('入库[chunk_and_index] doc=%s chunk=%d status=indexed',
+                    document_id, len(chunks))
         return {'chunk_count': len(chunks)}
 
     def route_after_add(state: IngestState) -> str:

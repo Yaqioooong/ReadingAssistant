@@ -15,7 +15,10 @@ from reading_assistant.api.deps import (
 )
 from reading_assistant.api.routes import documents, hitl, sessions
 from reading_assistant.storage import create_db_engine, init_db
+from reading_assistant.utils.logger_handler import get_logger
 from reading_assistant.utils.path_tools import get_abs_path
+
+logger = get_logger('api')
 
 
 def create_app(
@@ -26,14 +29,28 @@ def create_app(
     upload_dir: Path | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用；不传参时使用生产组件。"""
+    import time
+
     @asynccontextmanager
     async def lifespan(_: FastAPI):
         # 生产模式（未注入 session_factory）时确保表结构存在；
         # 测试注入 sqlite 工厂时不碰生产库
         if session_factory is None:
             init_db(create_db_engine())
+        logger.info('ReadingAssistant API 启动')
         yield
+        logger.info('ReadingAssistant API 关闭')
     app = FastAPI(title='ReadingAssistant API', version='0.1.0', lifespan=lifespan)
+
+    @app.middleware('http')
+    async def access_log(request, call_next):
+        start = time.perf_counter()
+        response = await call_next(request)
+        cost_ms = (time.perf_counter() - start) * 1000
+        logger.info('%s %s -> %d (%.0fms)', request.method, request.url.path,
+                    response.status_code, cost_ms)
+        return response
+
     if session_factory is not None:
         app.dependency_overrides[get_session_factory] = lambda: session_factory
     if vector_store is not None:
