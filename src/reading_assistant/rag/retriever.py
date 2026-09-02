@@ -54,6 +54,7 @@ class Retriever:
         embedding = self._embed(query)
         where = {'document_id': document_id} if document_id is not None else None
         hits = self._vector_store.query(embedding, top_k=k, where=where)
+        min_score = settings.retrieval_min_score
         return [
             RetrievedChunk(
                 chunk_id=hit.id,
@@ -64,6 +65,7 @@ class Retriever:
                 chapter_index=hit.metadata.get('chapter_index'),
             )
             for hit in hits
+            if hit.score >= min_score
         ]
 
     def embed(self, query: str) -> list[float]:

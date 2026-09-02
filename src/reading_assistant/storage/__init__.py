@@ -16,6 +16,7 @@ from reading_assistant.storage.models import (
 )
 from reading_assistant.storage.repositories import (
     create_hitl_task,
+    delete_session,
     get_document,
     get_document_by_content_hash,
     get_document_by_file_hash,
@@ -29,6 +30,7 @@ from reading_assistant.storage.repositories import (
     save_qa_cache_entry,
     submit_hitl_clarification,
     touch_qa_cache_hit,
+    update_document_index_status,
 )
 from reading_assistant.storage.service import (
     AddBookResult,
@@ -61,6 +63,7 @@ __all__ = [
     'StoredChunk',
     'VectorStore',
     'create_hitl_task',
+    'delete_session',
     'create_db_engine',
     'create_session_factory',
     'create_vector_store',
@@ -82,4 +85,5 @@ __all__ = [
     'session_scope',
     'sha256_hex',
     'submit_hitl_clarification',
+    'update_document_index_status',
 ]

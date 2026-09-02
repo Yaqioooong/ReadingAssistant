@@ -107,7 +107,7 @@ class TestRetriever:
 
         hits = retriever.retrieve('张三')
 
-        assert [hit.chunk_id for hit in hits] == ['c1', 'c3', 'c2']
+        assert [hit.chunk_id for hit in hits] == ['c1', 'c3']
         assert hits[0].document_id == 1
         assert hits[0].chapter == '第一章'
         assert hits[0].citation == '文档 1｜第一章'
@@ -126,3 +126,23 @@ class TestRetriever:
 
         assert len(hits) == 1
         assert hits[0].chunk_id == 'c1'
+
+    def test_retrieve_filters_low_similarity(self, monkeypatch) -> None:
+        from reading_assistant.rag.retriever import Retriever
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(
+            'reading_assistant.rag.retriever.get_settings',
+            lambda: SimpleNamespace(
+                top_k=6,
+                retrieval_min_score=0.9,
+                cache_enabled=False,
+                cache_max_entries=100,
+            ),
+        )
+        retriever = Retriever(self._store(), FakeEmbeddings([1.0, 0.0]))
+
+        # 仅 c1（相似度 1.0）达标；c3（0.707）与 c2（0.0）都被过滤
+        hits = retriever.retrieve('张三')
+
+        assert [hit.chunk_id for hit in hits] == ['c1']

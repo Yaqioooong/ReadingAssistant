@@ -44,6 +44,10 @@ class VectorStore(ABC):
     def count(self) -> int:
         """返回分块总数。"""
 
+    @abstractmethod
+    def delete(self, document_id: int) -> None:
+        """删除指定文档的全部向量分块"""
+
 
 class ChromaVectorStore(VectorStore):
     """基于 chromadb 的本地持久化实现。"""
@@ -83,7 +87,8 @@ class ChromaVectorStore(VectorStore):
         return [
             SearchHit(
                 id=chunk_id,
-                score=distances[index] if index < len(distances) else 0.0,
+                # Chroma 返回的是距离（越小越相关），统一转成 0~1 相似度（越大越相关）
+                score=1.0 / (1.0 + distances[index]) if index < len(distances) else 0.0,
                 metadata=metadatas[index] or {},
                 text=documents[index] or '',
             )
@@ -92,6 +97,9 @@ class ChromaVectorStore(VectorStore):
 
     def count(self) -> int:
         return self._collection.count()
+
+    def delete(self, document_id: int) -> None:
+        self._collection.delete(where={'document_id': document_id})
 
 
 class InMemoryVectorStore(VectorStore):
@@ -124,6 +132,11 @@ class InMemoryVectorStore(VectorStore):
 
     def count(self) -> int:
         return len(self._chunks)
+
+    def delete(self, document_id: int) -> None:
+        for chunk_id in list(self._chunks):
+            if self._chunks[chunk_id].metadata.get('document_id') == document_id:
+                del self._chunks[chunk_id]
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:

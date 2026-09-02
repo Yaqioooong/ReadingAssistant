@@ -15,7 +15,7 @@ from reading_assistant.api.deps import (
     get_vector_store,
 )
 from reading_assistant.graph import build_qa_graph
-from reading_assistant.storage import ChatMessage, ChatSession
+from reading_assistant.storage import ChatMessage, ChatSession, delete_session
 from reading_assistant.storage.vector_store import VectorStore
 
 router = APIRouter(prefix='/api/sessions', tags=['sessions'])
@@ -54,6 +54,16 @@ def get_messages(session_id: int, session: Session = Depends(get_db_session)):
             select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)
         )
     )
+
+
+@router.delete('/{session_id}', status_code=204)
+def delete_chat_session(
+    session_id: int,
+    session: Session = Depends(get_db_session),
+) -> None:
+    """删除会话及其全部消息与 HITL 任务。"""
+    if not delete_session(session, session_id):
+        raise HTTPException(status_code=404, detail=f'会话不存在: {session_id}')
 
 
 @router.post('/{session_id}/messages', response_model=schemas.AskResponse)

@@ -2,11 +2,11 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from reading_assistant.storage.models import Document, HitlTask, QaCacheEntry
+from reading_assistant.storage.models import ChatSession, Document, HitlTask, QaCacheEntry
 
 
 def get_document(session: Session, document_id: int) -> Document | None:
@@ -119,9 +119,9 @@ def save_qa_cache_entry(
     """写入一条问答缓存；精确键已存在时更新内容并重置命中计数"""
     existing = get_qa_cache_entry(session, question_hash, content_hash, document_id)
     if existing is not None:
-        existing.question_raw = (question_raw,)
-        existing.question_normalized = (question_normalized,)
-        existing.answer = (answer,)
+        existing.question_raw = question_raw
+        existing.question_normalized = question_normalized
+        existing.answer = answer
         existing.citations = citations or []
         existing.needs_clarification = needs_clarification
         if question_embedding is not None:
@@ -135,6 +135,7 @@ def save_qa_cache_entry(
         question_hash=question_hash,
         question_embedding=question_embedding or [],
         answer=answer,
+        citations=citations or [],
         needs_clarification=needs_clarification,
         document_id=document_id,
         content_hash=content_hash,
@@ -163,11 +164,9 @@ def prune_qa_cache(session: Session, max_entries: int) -> None:
     for entry in stale:
         session.delete(entry)
 
+
 def list_qa_cache_entries(
-        session: Session,
-        content_hash: str,
-        document_id: int | None = None,
-        limit: int = 200
+    session: Session, content_hash: str, document_id: int | None = None, limit: int = 200
 ) -> list[QaCacheEntry]:
     """语义匹配候选：同文档版本范围内，最近命中的缓存条目（上限200条）"""
     stmt = (
@@ -181,3 +180,19 @@ def list_qa_cache_entries(
     else:
         stmt = stmt.where(QaCacheEntry.document_id == document_id)
     return list(session.scalars(stmt))
+
+
+def update_document_index_status(session: Session, document_id: int, status: str) -> None:
+    document = session.get(Document, document_id)
+    document.index_status = status
+
+
+def delete_session(session: Session, session_id: int) -> bool:
+    """删除会话及其消息、HITL 任务；会话不存在返回 False。"""
+    chat = session.get(ChatSession, session_id)
+    if chat is None:
+        return False
+    # HITL 任务持有 session_id 外键（无级联），需先删除
+    session.execute(delete(HitlTask).where(HitlTask.session_id == session_id))
+    session.delete(chat)  # chat_messages 由 relationship 级联删除
+    return True

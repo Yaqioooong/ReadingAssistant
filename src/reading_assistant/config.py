@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     chroma_persist_dir: str = _chroma_cfg.get('persist_directory', 'rag/chroma_db')
     vector_store_backend: str = 'chroma'
     top_k: int = int(_chroma_cfg.get('k', 6))
+    retrieval_min_score: float = float(_chroma_cfg.get('min_score', 0.45))
     data_path: str = _chroma_cfg.get('data_path', 'data')
     allow_knowledge_file_type: list[str] = _chroma_cfg.get(
         'allow_knowledge_file_type', ['txt', 'pdf', 'epub']

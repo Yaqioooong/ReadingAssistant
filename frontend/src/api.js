@@ -26,6 +26,10 @@ function apiPost(path, body) {
   }).then(parseResponse)
 }
 
+function apiDelete(path) {
+  return fetch(path, { method: 'DELETE' }).then(parseResponse)
+}
+
 export const getDocuments = () => apiGet('/api/documents')
 export const uploadBook = (file) => {
   const form = new FormData()
@@ -37,6 +41,7 @@ export const listSessions = () => apiGet('/api/sessions')
 export const getHistory = (sessionId) => apiGet(`/api/sessions/${sessionId}/messages`)
 export const sendMessage = (sessionId, payload) =>
   apiPost(`/api/sessions/${sessionId}/messages`, payload)
+export const deleteSession = (sessionId) => apiDelete(`/api/sessions/${sessionId}`)
 
 export function formatTime(iso) {
   if (!iso) return ''

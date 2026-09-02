@@ -33,6 +33,25 @@ class TestInMemoryVectorStore:
         assert [hit.id for hit in filtered] == ['c3']
         assert store.count() == 3
 
+    def test_delete_removes_only_matching_document(self) -> None:
+        store = InMemoryVectorStore()
+        store.add(_chunks())
+
+        store.delete(1)
+
+        assert store.count() == 1
+        hits = store.query([1.0, 0.0], top_k=5)
+        assert [hit.id for hit in hits] == ['c3']
+
+    def test_delete_missing_document_is_noop(self) -> None:
+        store = InMemoryVectorStore()
+        store.add(_chunks())
+
+        store.delete(999)
+
+        assert store.count() == 3
+        assert len(store.query([1.0, 0.0], top_k=5)) == 3
+
 
 class TestChromaVectorStore:
     def test_add_query_and_count(self, tmp_path: Path) -> None:
@@ -54,6 +73,18 @@ class TestChromaVectorStore:
 
         reopened = ChromaVectorStore(persist_dir=persist_dir, collection_name='persist_coll')
         assert reopened.count() == 3
+
+    def test_delete_removes_only_matching_document(self, tmp_path: Path) -> None:
+        store = ChromaVectorStore(
+            persist_dir=str(tmp_path / 'chroma'), collection_name='del_coll'
+        )
+        store.add(_chunks())
+
+        store.delete(1)
+
+        assert store.count() == 1
+        hits = store.query([1.0, 0.0], top_k=5)
+        assert [hit.id for hit in hits] == ['c3']
 
 
 class TestFactory:

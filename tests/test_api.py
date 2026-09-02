@@ -9,6 +9,7 @@ from langchain_core.embeddings import Embeddings
 
 from reading_assistant.api import create_app
 from reading_assistant.storage import (
+    Document,
     HitlTask,
     create_db_engine,
     create_session_factory,
@@ -129,6 +130,40 @@ class TestDocuments:
 
         assert response.status_code == 422
 
+    def test_reindex_document_keeps_chunk_count(self, client: TestClient) -> None:
+        uploaded = _upload_txt(client).json()
+
+        response = client.post(f"/api/documents/{uploaded['id']}/reindex")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body['id'] == uploaded['id']
+        assert body['chunk_count'] == uploaded['chunk_count']
+
+        # 重复 reindex 应幂等
+        again = client.post(f"/api/documents/{uploaded['id']}/reindex")
+        assert again.status_code == 200
+        assert again.json()['chunk_count'] == uploaded['chunk_count']
+
+    def test_reindex_marks_document_indexed(self, tmp_path: Path) -> None:
+        app, engine = _make_app(tmp_path, InMemoryVectorStore())
+        session_factory = create_session_factory(engine)
+        with TestClient(app) as client:
+            uploaded = _upload_txt(client).json()
+
+            response = client.post(f"/api/documents/{uploaded['id']}/reindex")
+            assert response.status_code == 200
+
+            with session_factory() as session:
+                document = session.get(Document, uploaded['id'])
+                assert document.index_status == 'indexed'
+        engine.dispose()
+
+    def test_reindex_missing_document_404(self, client: TestClient) -> None:
+        response = client.post('/api/documents/999/reindex')
+
+        assert response.status_code == 404
+
 
 class TestSessions:
     def test_create_and_list_sessions(self, client: TestClient) -> None:
@@ -155,6 +190,41 @@ class TestSessions:
         assert client.get('/api/sessions/999/messages').status_code == 404
         response = client.post('/api/sessions/999/messages', json={'question': '你好'})
         assert response.status_code == 404
+
+    def test_delete_session_removes_messages(self, client: TestClient) -> None:
+        session_id = client.post('/api/sessions').json()['session_id']
+        client.post(
+            f'/api/sessions/{session_id}/messages',
+            json={'question': '张三是谁', 'document_ids': [1]},
+        )
+
+        response = client.delete(f'/api/sessions/{session_id}')
+
+        assert response.status_code == 204
+        assert client.get(f'/api/sessions/{session_id}/messages').status_code == 404
+        assert client.get('/api/sessions').json() == []
+
+    def test_delete_session_removes_hitl_tasks(self, tmp_path: Path) -> None:
+        app, engine = _make_app(tmp_path, InMemoryVectorStore())
+        with TestClient(app) as client:
+            session_id = client.post('/api/sessions').json()['session_id']
+            client.post(
+                f'/api/sessions/{session_id}/messages', json={'question': '无结果提问'}
+            )
+            tasks = client.get(
+                '/api/hitl/tasks', params={'session_id': int(session_id)}
+            ).json()
+            assert len(tasks) == 1
+
+            assert client.delete(f'/api/sessions/{session_id}').status_code == 204
+            remaining = client.get(
+                '/api/hitl/tasks', params={'session_id': int(session_id)}
+            ).json()
+            assert remaining == []
+        engine.dispose()
+
+    def test_delete_missing_session_404(self, client: TestClient) -> None:
+        assert client.delete('/api/sessions/999').status_code == 404
 
 
 class TestAsk:
@@ -183,6 +253,49 @@ class TestAsk:
         response = client.post(f'/api/sessions/{session_id}/messages', json={'question': ''})
 
         assert response.status_code == 422
+
+    def test_cache_hit_returns_citations(self, client: TestClient) -> None:
+        session_id = client.post('/api/sessions').json()['session_id']
+        payload = {'question': '张三是谁', 'document_ids': [1]}
+
+        first = client.post(f'/api/sessions/{session_id}/messages', json=payload)
+        assert first.status_code == 200
+        assert len(first.json()['citations']) >= 1
+
+        # 同一问题第二次提问应命中缓存，且引用必须完整返回
+        second = client.post(f'/api/sessions/{session_id}/messages', json=payload)
+        assert second.status_code == 200
+        body = second.json()
+        assert body['answer'] == '这是基于原文的测试回答。'
+        assert body['citations'] == first.json()['citations']
+        assert body['citations'][0]['excerpt']
+
+    def test_same_question_across_documents_no_conflict(self, tmp_path: Path) -> None:
+        app, engine = _make_app(tmp_path, InMemoryVectorStore())
+        with TestClient(app) as client:
+            first = _upload_txt(
+                client, filename='a.txt', content='第一章 甲\n内容甲。\n'
+            ).json()
+            second = _upload_txt(
+                client, filename='b.txt', content='第一章 乙\n内容乙。\n'
+            ).json()
+            session_id = client.post('/api/sessions').json()['session_id']
+
+            # 同一问题在文档 A 上问（生成缓存）
+            r1 = client.post(
+                f'/api/sessions/{session_id}/messages',
+                json={'question': '内容是什么', 'document_ids': [first['id']]},
+            )
+            assert r1.status_code == 200
+
+            # 同样的问题在文档 B 上问：不应触发 question_hash 唯一约束冲突
+            r2 = client.post(
+                f'/api/sessions/{session_id}/messages',
+                json={'question': '内容是什么', 'document_ids': [second['id']]},
+            )
+            assert r2.status_code == 200
+            assert len(r2.json()['citations']) >= 1
+        engine.dispose()
 
 
 class TestHitl:

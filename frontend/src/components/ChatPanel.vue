@@ -5,6 +5,7 @@ import {
   listSessions,
   getHistory,
   sendMessage,
+  deleteSession,
   formatTime,
 } from '../api.js'
 
@@ -47,6 +48,19 @@ async function createNewSession() {
     scrollToBottom()
   } catch (err) {
     messages.value = [{ role: 'system', content: `出错：${err.message}` }]
+  }
+}
+
+async function removeSession(id) {
+  try {
+    await deleteSession(id)
+    sessions.value = sessions.value.filter((s) => s.id !== id)
+    if (currentSessionId.value === id) {
+      currentSessionId.value = null
+      messages.value = []
+    }
+  } catch (err) {
+    messages.value = [{ role: 'system', content: `删除失败：${err.message}` }]
   }
 }
 
@@ -104,7 +118,23 @@ async function send() {
 }
 
 function citationSource(c) {
-  return [c.chapter, c.page ? `第 ${c.page} 页` : null].filter(Boolean).join(' · ') || '引用'
+  // chunk_id 形如 doc{document_id}-{index}，据此找到对应的书籍名
+  const match = /^doc(\d+)-/.exec(c.chunk_id || '')
+  const docId = match ? Number(match[1]) : null
+  const doc = docId ? props.documents.find((d) => d.id === docId) : null
+  const docName = doc ? doc.filename : docId ? `文档 ${docId}` : ''
+  const chapter = c.chapter && c.chapter !== '正文' ? c.chapter : ''
+  return [docName, chapter].filter(Boolean).join(' · ') || '引用'
+}
+
+const EXCERPT_PREVIEW_LEN = 60
+
+function excerptPreview(text) {
+  return text.length > EXCERPT_PREVIEW_LEN ? `${text.slice(0, EXCERPT_PREVIEW_LEN)}…` : text
+}
+
+function toggleExcerpt(c) {
+  c.expanded = !c.expanded
 }
 
 async function scrollToBottom() {
@@ -146,7 +176,17 @@ onMounted(loadSessions)
             :class="{ active: s.id === currentSessionId }"
             @click="selectSession(s.id)"
           >
-            <span class="session-title">{{ sessionLabel(s) }}</span>
+            <span class="session-row">
+              <span class="session-title">{{ sessionLabel(s) }}</span>
+              <button
+                class="session-delete"
+                title="删除会话"
+                :disabled="sending"
+                @click.stop="removeSession(s.id)"
+              >
+                ×
+              </button>
+            </span>
             <span class="session-time">{{ formatTime(s.created_at) }}</span>
           </li>
         </ul>
@@ -158,15 +198,6 @@ onMounted(loadSessions)
       <header class="chat-header">
         <div class="chat-header-inner">
           <h2 class="chat-title">{{ currentTitle }}</h2>
-          <label class="filter">
-            <span class="filter-label">检索范围</span>
-            <select v-model="filterDoc" class="select">
-              <option value="">全部书籍</option>
-              <option v-for="doc in documents" :key="doc.id" :value="doc.id">
-                {{ doc.filename }}
-              </option>
-            </select>
-          </label>
         </div>
       </header>
 
@@ -184,8 +215,23 @@ onMounted(loadSessions)
                 <span class="content">{{ m.content }}</span>
                 <div v-if="m.citations && m.citations.length" class="citations">
                   <div v-for="(c, j) in m.citations" :key="j" class="citation">
-                    <span class="src">{{ citationSource(c) }}</span>
-                    <div class="excerpt">{{ c.excerpt }}</div>
+                    <span class="src">[{{ j + 1 }}] {{ citationSource(c) }}</span>
+                    <div class="excerpt">
+                      <span>
+                        {{
+                          c.excerpt.length > EXCERPT_PREVIEW_LEN && !c.expanded
+                            ? excerptPreview(c.excerpt)
+                            : c.excerpt
+                        }}
+                      </span>
+                      <button
+                        v-if="c.excerpt.length > EXCERPT_PREVIEW_LEN"
+                        class="expand-btn"
+                        @click="toggleExcerpt(c)"
+                      >
+                        {{ c.expanded ? '收起' : '展开' }}
+                      </button>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -206,17 +252,29 @@ onMounted(loadSessions)
 
       <div class="chat-input">
         <div class="input-inner">
-          <textarea
-            v-model="question"
-            rows="2"
-            placeholder="向书籍提问，Enter 发送，Shift + Enter 换行"
-            @keydown.enter.exact.prevent="send"
-          ></textarea>
-          <button class="send-btn" :disabled="sending || !question.trim()" @click="send">
-            {{ sending ? '…' : '↑' }}
-          </button>
+          <div class="doc-picker">
+            <span class="book-icon">📚</span>
+            <span class="doc-picker-label">检索范围</span>
+            <select v-model="filterDoc" class="select doc-select">
+              <option value="">全部书籍</option>
+              <option v-for="doc in documents" :key="doc.id" :value="doc.id">
+                {{ doc.filename }}
+              </option>
+            </select>
+          </div>
+          <div class="input-row">
+            <textarea
+              v-model="question"
+              rows="2"
+              placeholder="向书籍提问，Enter 发送，Shift + Enter 换行"
+              @keydown.enter.exact.prevent="send"
+            ></textarea>
+            <button class="send-btn" :disabled="sending || !question.trim()" @click="send">
+              {{ sending ? '…' : '↑' }}
+            </button>
+          </div>
         </div>
-        <p class="input-hint">回答基于已上传书籍内容，可在右上角指定检索范围</p>
+        <p class="input-hint">回答基于已上传书籍内容，可在输入框上方选择检索范围</p>
       </div>
     </div>
   </div>

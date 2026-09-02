@@ -8,12 +8,13 @@ from langgraph.graph import END, START, StateGraph
 from sqlalchemy.orm import Session, sessionmaker
 
 from reading_assistant.model.factory import get_embedding_model
-from reading_assistant.parsers import Chapter, ParsedBook
+from reading_assistant.parsers import Chapter, ParsedBook, parse_book
 from reading_assistant.rag import chunk_book
 from reading_assistant.storage import (
     DocumentService,
     get_document,
     session_scope,
+    update_document_index_status,
 )
 from reading_assistant.storage.vector_store import StoredChunk, VectorStore
 
@@ -29,6 +30,7 @@ class IngestState(TypedDict, total=False):
     author: str | None
     chapters: list[dict]
     chunk_count: int
+    force: bool
 
 
 def build_ingest_graph(
@@ -49,6 +51,10 @@ def build_ingest_graph(
             result = DocumentService(session).add_book(
                 state['book_path'], filename=state.get('filename')
             )
+            if result.parsed is None and state.get('force'):
+                # reindex：file_hash 命中时 add_book 不重新解析，手动补上章节内容
+                result.parsed = parse_book(state['book_path'])
+            result.document.index_status = 'indexing'
             return {
                 'document_id': result.document.id,
                 'duplicate': result.duplicate,
@@ -73,27 +79,33 @@ def build_ingest_graph(
                 for chapter in state.get('chapters', [])
             ],
         )
-        chunks = chunk_book(book)
-        vectors = embeddings.embed_documents([chunk.text for chunk in chunks])
         document_id = state['document_id']
-        vector_store.add(
-            [
-                StoredChunk(
-                    id=f'doc{document_id}-{chunk.index}',
-                    text=chunk.text,
-                    metadata={'document_id': document_id, **chunk.metadata},
-                    embedding=vectors[index],
-                )
-                for index, chunk in enumerate(chunks)
-            ]
-        )
-        with session_scope(session_factory) as session:
-            document = get_document(session, document_id)
-            document.chunk_count = len(chunks)
+        try:
+            chunks = chunk_book(book)
+            vectors = embeddings.embed_documents([chunk.text for chunk in chunks])
+            vector_store.add(
+                [
+                    StoredChunk(
+                        id=f'doc{document_id}-{chunk.index}',
+                        text=chunk.text,
+                        metadata={'document_id': document_id, **chunk.metadata},
+                        embedding=vectors[index],
+                    )
+                    for index, chunk in enumerate(chunks)
+                ]
+            )
+            with session_scope(session_factory) as session:
+                document = get_document(session, document_id)
+                document.chunk_count = len(chunks)
+                document.index_status = 'indexed'
+        except Exception:
+            with session_scope(session_factory) as session:
+                update_document_index_status(session, document_id, 'failed')
+            raise
         return {'chunk_count': len(chunks)}
 
     def route_after_add(state: IngestState) -> str:
-        return END if state.get('duplicate') else 'chunk_and_index'
+        return END if state.get('duplicate') and not state.get('force') else 'chunk_and_index'
 
     graph = StateGraph(IngestState)
     graph.add_node('add_book', add_book)

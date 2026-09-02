@@ -4,7 +4,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from sqlalchemy.orm import Session
+from langchain_core.embeddings import Embeddings
+from sqlalchemy.orm import Session, sessionmaker
 
 from reading_assistant.api import schemas
 from reading_assistant.api.deps import (
@@ -16,7 +17,7 @@ from reading_assistant.api.deps import (
 )
 from reading_assistant.graph import build_ingest_graph
 from reading_assistant.parsers import ParseError, UnsupportedFormatError, get_parser
-from reading_assistant.storage import get_document
+from reading_assistant.storage import VectorStore, get_document
 from reading_assistant.storage import list_documents as list_document_rows
 
 router = APIRouter(prefix='/api/documents', tags=['documents'])
@@ -64,5 +65,38 @@ def upload_document(
         author=document.author,
         chunk_count=document.chunk_count,
         created_at=document.created_at,
+        duplicate=result['duplicate'],
+    )
+
+
+@router.post('/{document_id}/reindex', response_model=schemas.UploadResponse)
+def reindex_document(
+    document_id: int,
+    session_factory: sessionmaker[Session] = Depends(get_session_factory),
+    vector_store: VectorStore = Depends(get_vector_store),
+    embedding_model: Embeddings = Depends(get_embedding_model),
+    session: Session = Depends(get_db_session),
+):
+    document = get_document(session, document_id)
+    if document is None:
+        raise HTTPException(status_code=404, detail='Document not found')
+
+    if not document.file_path or not Path(document.file_path).exists():
+        raise HTTPException(status_code=409, detail='sourcefile not found, cannot reindex')
+
+    graph = build_ingest_graph(session_factory, vector_store, embedding_model=embedding_model)
+    result = graph.invoke(
+        {'book_path': document.file_path, 'force': True},
+        config={'configurable': {'thread_id': f'{document_id}-{uuid4().hex}'}},
+    )
+
+    refreshed = get_document(session, document_id)
+    return schemas.UploadResponse(
+        id=refreshed.id,
+        filename=refreshed.filename,
+        title=refreshed.title,
+        author=refreshed.author,
+        chunk_count=refreshed.chunk_count,
+        created_at=refreshed.created_at,
         duplicate=result['duplicate'],
     )

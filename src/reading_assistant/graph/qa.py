@@ -61,20 +61,28 @@ def _chunk_to_dict(chunk) -> dict:
 def _build_answer_prompt(
     question: str, chunks: list[dict], clarification: str | None = None
 ) -> str:
-    context = (
-        '\n\n'.join(
-            f'[{index}]（{chunk.get("citation", "")}）\n{chunk["text"]}'
-            for index, chunk in enumerate(chunks, start=1)
+    if chunks:
+        context = '\n\n'.join(
+            f'[{index}]\n{chunk["text"]}' for index, chunk in enumerate(chunks, start=1)
         )
-        or '（未检索到相关原文片段）'
-    )
-    lines = ['你是阅读助手，请仅根据提供的原文片段回答问题。', f'问题：{question}']
+    else:
+        context = '（未检索到相关原文片段）'
+    lines = [
+        '你是阅读助手。请仅根据下方"原文片段"回答问题，不要使用外部知识。',
+        f'问题：{question}',
+    ]
     if clarification:
-        lines.append(f'用户的补充说明：{clarification}')
+        lines.append(f'用户补充说明：{clarification}')
     lines.extend(
         [
             f'原文片段：\n{context}',
-            '回答时注明引用片段编号；若原文不足以回答，请直接说明。',
+            (
+                '回答要求：\n'
+                '1. 用简洁自然的中文直接作答，不要复述或粘贴原文片段。\n'
+                '2. 需要引用原文时，在对应句子末尾用 [n] 标注（n 为片段编号），'
+                '例如：朱六希望张三喜欢王五[1]。\n'
+                '3. 若原文不足以回答，直接说明"原文中没有相关信息"。'
+            ),
         ]
     )
     return '\n\n'.join(lines)
@@ -140,6 +148,8 @@ def build_qa_graph(
             normalize_question(state['question'])
             + '|'
             + normalize_question(state.get('clarification') or '')
+            + '|'
+            + str(state.get('document_id') or '')
         )
         with session_scope(session_factory) as session:
             doc_id = state.get('document_id')

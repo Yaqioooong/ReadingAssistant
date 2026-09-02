@@ -29,7 +29,8 @@ class Document(Base):
     chunk_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     duplicate_of: Mapped[int | None] = mapped_column(ForeignKey('documents.id'))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-
+    # pending, indexing, indexed, failed
+    index_status: Mapped[str] = mapped_column(String(16),nullable=False, default='pending') 
 
 class ChatSession(Base):
     """一次对话会话。"""

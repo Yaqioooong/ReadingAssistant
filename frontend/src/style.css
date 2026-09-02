@@ -302,6 +302,38 @@ h2 {
   word-break: break-all;
   transition: background-color 0.12s, color 0.12s;
 }
+.session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+}
+.session-delete {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, background-color 0.12s, color 0.12s;
+}
+.session-list li:hover .session-delete,
+.session-delete:focus-visible {
+  opacity: 1;
+}
+.session-delete:hover:not(:disabled) {
+  background: var(--err);
+  color: #ffffff;
+}
+.session-delete:disabled {
+  cursor: not-allowed;
+}
 .session-list li:hover {
   background: var(--hover);
   color: var(--text);
@@ -521,6 +553,21 @@ h2 {
 }
 .citation .excerpt {
   margin-top: 2px;
+  line-height: 1.5;
+}
+.expand-btn {
+  display: block;
+  margin-top: 4px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.expand-btn:hover {
+  text-decoration: underline;
 }
 
 /* ===== 聊天页：输入区 ===== */
@@ -534,7 +581,7 @@ h2 {
   max-width: 860px;
   margin: 0 auto;
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
   gap: 8px;
   background: var(--input-bg);
   border: 1px solid var(--border);
@@ -545,7 +592,37 @@ h2 {
 .input-inner:focus-within {
   border-color: var(--accent);
 }
-.input-inner textarea {
+.doc-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.doc-picker .book-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+.doc-picker-label {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.doc-select {
+  max-width: 280px;
+  padding: 4px 8px;
+  font-size: 12px;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.input-row textarea {
   flex: 1;
   resize: none;
   border: none;
