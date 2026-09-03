@@ -7,6 +7,7 @@ from typing import TypedDict
 from langchain_core.embeddings import Embeddings
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from langchain_core.tools import tool
 from sqlalchemy.orm import Session, sessionmaker
 
 from reading_assistant.config import get_settings
@@ -82,11 +83,51 @@ def _build_answer_prompt(
                 '1. 用简洁自然的中文直接作答，不要复述或粘贴原文片段。\n'
                 '2. 需要引用原文时，在对应句子末尾用 [n] 标注（n 为片段编号），'
                 '例如：朱六希望张三喜欢王五[1]。\n'
-                '3. 若原文不足以回答，直接说明"原文中没有相关信息"。'
+                '3. 若原文片段足以回答，请调用 final_answer 工具提交回答；'
+                '若不足以回答，请调用 request_clarification 工具并说明缺少什么。'
             ),
         ]
     )
     return '\n\n'.join(lines)
+
+
+@tool
+def final_answer(answer: str) -> str:
+    """检索到的原文片段足以回答用户问题：给出正式回答。
+
+    Args:
+        answer: 对用户问题的完整回答
+    """
+    return answer
+
+
+@tool
+def request_clarification(missing_info: str) -> str:
+    """检索到的原文片段不足以回答用户问题：请求澄清。
+
+    Args:
+        missing_info: 为回答问题，还需要补充哪方面的书籍内容
+    """
+    return missing_info
+
+
+_NO_INFO_MARKERS = (
+    '原文中没有相关信息',
+    '没有相关信息',
+    '原文未提及',
+    '原文没有',
+    '没有找到',
+    '无法根据原文',
+    '无法回答',
+    '信息不足',
+    '不足以回答',
+)
+
+
+def _looks_like_no_info(content: str) -> bool:
+    """启发式检测：LLM 是否判定原文信息不足（只看回答开头 80 字符）。"""
+    head = (content or '').strip()[:80]
+    return any(marker in head for marker in _NO_INFO_MARKERS)
 
 
 def _is_cache_expired(entry, ttl_days: int) -> bool:
@@ -175,6 +216,16 @@ def build_qa_graph(
                                 'question_hash': question_hash,
                                 'question_embedding': embedding,
                             }
+                        if best_entry.answer and _looks_like_no_info(best_entry.answer):
+                            # 无效缓存：信息不足式回答不应被缓存，删除并重新回答
+                            logger.warning('问答[缓存] 丢弃无效回答缓存 id=%s q=%.30s',
+                                           best_entry.id, state['question'])
+                            session.delete(best_entry)
+                            return {
+                                'cache_hit': False,
+                                'question_hash': question_hash,
+                                'question_embedding': embedding,
+                            }
                         touch_qa_cache_hit(session, best_entry)
                         # 必须在commit之前取值（DetachedInstanceError）
                         answer = best_entry.answer
@@ -195,6 +246,12 @@ def build_qa_graph(
                     }
                 return {'cache_hit': False, 'question_hash': question_hash}
             if _is_cache_expired(entry, settings.cache_ttl_days):
+                session.delete(entry)
+                return {'cache_hit': False, 'question_hash': question_hash}
+            if entry.answer and _looks_like_no_info(entry.answer):
+                # 无效缓存：信息不足式回答不应被缓存，删除并重新回答
+                logger.warning('问答[缓存] 丢弃无效回答缓存 id=%s q=%.30s',
+                               entry.id, state['question'])
                 session.delete(entry)
                 return {'cache_hit': False, 'question_hash': question_hash}
             touch_qa_cache_hit(session, entry)
@@ -257,10 +314,46 @@ def build_qa_graph(
             clarification=state.get('clarification'),
         )
         start = time.perf_counter()
-        response = chat_model.invoke(prompt)
-        content = response.content if hasattr(response, 'content') else str(response)
-        logger.info('问答[answer] LLM 返回 len=%d (%.0fms) q=%.30s', len(content),
-                    (time.perf_counter() - start) * 1000, state['question'])
+        tool_calls = []
+        if hasattr(chat_model, 'bind_tools'):
+            try:
+                response = chat_model.bind_tools(
+                    [final_answer, request_clarification]
+                ).invoke(prompt)
+                tool_calls = getattr(response, 'tool_calls', None) or []
+            except Exception:
+                logger.exception('问答[answer] 工具调用异常，回退纯文本')
+                response = chat_model.invoke(prompt)
+        else:
+            response = chat_model.invoke(prompt)
+        cost_ms = (time.perf_counter() - start) * 1000
+
+        if tool_calls:
+            # 主判定：LLM 通过工具调用显式表态
+            call = tool_calls[0]
+            args = call.get('args') or {}
+            if call.get('name') == 'request_clarification':
+                missing = args.get('missing_info') or ''
+                logger.info('问答[answer] 工具判定信息不足 → HITL missing=%.50s (%.0fms)',
+                            missing, cost_ms)
+                if not state.get('clarification'):
+                    # 转入 HITL 澄清，不缓存该回答、不写入聊天记录
+                    return {'needs_clarification': True, 'answer': None, 'citations': []}
+                # 澄清后模型仍判定不足：不再重复建任务，以说明文本作回答
+                content = missing or '澄清后原文信息仍然不足。'
+            else:
+                content = args.get('answer') or ''
+                logger.info('问答[answer] 工具 final_answer len=%d (%.0fms)', len(content),
+                            cost_ms)
+        else:
+            # 兜底 1：模型未走工具，按纯文本处理
+            content = response.content if hasattr(response, 'content') else str(response)
+            logger.info('问答[answer] 纯文本回答 len=%d (%.0fms)', len(content), cost_ms)
+            # 兜底 2：纯文本含"信息不足"措辞 → 仍转 HITL
+            if not state.get('clarification') and _looks_like_no_info(content):
+                logger.info('问答[answer] 文本兜底判定信息不足，转入 HITL q=%.30s',
+                            state['question'])
+                return {'needs_clarification': True, 'answer': None, 'citations': []}
         citations = [
             {
                 'chunk_id': chunk['chunk_id'],
@@ -314,6 +407,9 @@ def build_qa_graph(
     def route_after_judge(state: QAState) -> str:
         return 'create_hitl' if state.get('needs_clarification') else 'answer'
 
+    def route_after_answer(state: QAState) -> str:
+        return 'create_hitl' if state.get('needs_clarification') else 'record'
+
     graph = StateGraph(QAState)
     graph.add_node('cache_check', cache_check)
     graph.add_node('retrieve', retrieve)
@@ -333,7 +429,11 @@ def build_qa_graph(
         route_after_judge,
         {'answer': 'answer', 'create_hitl': 'create_hitl'},
     )
-    graph.add_edge('answer', 'record')
+    graph.add_conditional_edges(
+        'answer',
+        route_after_answer,
+        {'create_hitl': 'create_hitl', 'record': 'record'},
+    )
     graph.add_edge('create_hitl', 'record')
     graph.add_edge('record', END)
     return graph.compile(checkpointer=checkpointer or InMemorySaver())

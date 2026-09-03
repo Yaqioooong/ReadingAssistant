@@ -1,0 +1,125 @@
+{
+  "说明": "黄金评测集：每题标注期望回答关键词或不可答期望。document 用文件名匹配（脚本上传后映射为 document_id）。",
+  "cases": [
+    {
+      "id": "love-01",
+      "question": "张三喜欢谁？",
+      "document": "张三爱情故事.txt",
+      "expect_keywords": ["李四"],
+      "expect_unanswerable": false,
+      "note": "正向基础题"
+    },
+    {
+      "id": "love-02",
+      "question": "王五喜欢谁？",
+      "document": "张三爱情故事.txt",
+      "expect_keywords": ["张三"],
+      "expect_unanswerable": false,
+      "note": "正向基础题"
+    },
+    {
+      "id": "love-03",
+      "question": "朱六想让张三喜欢谁？",
+      "document": "张三爱情故事.txt",
+      "expect_keywords": ["王五"],
+      "expect_unanswerable": false,
+      "note": "正向推断题"
+    },
+    {
+      "id": "love-04",
+      "question": "李四觉得朱六怎么样？",
+      "document": "张三爱情故事.txt",
+      "expect_keywords": ["讨厌"],
+      "expect_unanswerable": false,
+      "note": "原文有明确表述"
+    },
+    {
+      "id": "love-05",
+      "question": "王五喜欢李四吗？",
+      "document": "张三爱情故事.txt",
+      "expect_keywords": ["不", "没", "否", "不是"],
+      "expect_unanswerable": false,
+      "note": "陷阱题：李四喜欢王五≠王五喜欢李四，考验引用准确性"
+    },
+    {
+      "id": "shaobai-01",
+      "question": "少白公是什么身份？",
+      "document": "名词大动词.txt",
+      "expect_keywords": ["重臣", "国家元首", "第二号人物", "大臣"],
+      "expect_unanswerable": false,
+      "note": "身份题，多个关键词命中其一即可"
+    },
+    {
+      "id": "shaobai-02",
+      "question": "舵手为什么要打倒少白公？",
+      "document": "名词大动词.txt",
+      "expect_keywords": ["秩序", "务实", "路线", "运动"],
+      "expect_unanswerable": false,
+      "note": "原因题"
+    },
+    {
+      "id": "shaobai-03",
+      "question": "少白公在哪一年失去权力？",
+      "document": "名词大动词.txt",
+      "expect_keywords": ["1966", "一九六六"],
+      "expect_unanswerable": false,
+      "note": "年份题"
+    },
+    {
+      "id": "shaobai-04",
+      "question": "少白公的结局是什么？",
+      "document": "名词大动词.txt",
+      "expect_keywords": ["离世", "去世", "死", "幽禁"],
+      "expect_unanswerable": false,
+      "note": "结局题"
+    },
+    {
+      "id": "shaobai-05",
+      "question": "少白公的原名叫什么？",
+      "document": "名词大动词.txt",
+      "expect_keywords": [],
+      "expect_unanswerable": true,
+      "note": "信息不足题：原文未写原名，系统应诚实说明或走 HITL，不得编造"
+    },
+    {
+      "id": "santi-01",
+      "question": "罗辑收到的照片背面写了什么？",
+      "document": "sample_duplicate.txt",
+      "expect_keywords": ["不要回答", "别回答"],
+      "expect_unanswerable": false,
+      "note": "细节题"
+    },
+    {
+      "id": "santi-02",
+      "question": "罗辑在哪里听到对他的任命？",
+      "document": "sample_duplicate.txt",
+      "expect_keywords": ["联合国", "大会堂"],
+      "expect_unanswerable": false,
+      "note": "地点题"
+    },
+    {
+      "id": "santi-03",
+      "question": "按黑暗森林理论，文明生存的第一需要是什么？",
+      "document": "sample_duplicate.txt",
+      "expect_keywords": ["生存"],
+      "expect_unanswerable": false,
+      "note": "概念题"
+    },
+    {
+      "id": "santi-04",
+      "question": "罗辑在第三章放下了什么？",
+      "document": "sample_duplicate.txt",
+      "expect_keywords": ["酒杯", "酒"],
+      "expect_unanswerable": false,
+      "note": "细节题"
+    },
+    {
+      "id": "cross-01",
+      "question": "谁在说服张三放弃李四？",
+      "document": null,
+      "expect_keywords": ["朱六"],
+      "expect_unanswerable": false,
+      "note": "全库检索题：不指定文档"
+    }
+  ]
+}

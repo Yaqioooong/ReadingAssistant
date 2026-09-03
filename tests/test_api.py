@@ -8,9 +8,12 @@ from fastapi.testclient import TestClient
 from langchain_core.embeddings import Embeddings
 
 from reading_assistant.api import create_app
+from sqlalchemy import select
+
 from reading_assistant.storage import (
     Document,
     HitlTask,
+    QaCacheEntry,
     create_db_engine,
     create_session_factory,
     init_db,
@@ -41,14 +44,46 @@ class FakeLLM:
         return SimpleNamespace(content=self._content)
 
 
-def _make_app(tmp_path: Path, store: InMemoryVectorStore):
+class FakeNoInfoLLM(FakeLLM):
+    """模拟 LLM 判定原文信息不足。"""
+
+    def __init__(self) -> None:
+        super().__init__(content='原文中没有相关信息。')
+
+
+class _ToolResponse:
+    """带 tool_calls 的伪模型响应。"""
+
+    def __init__(self, name: str, args: dict) -> None:
+        self.content = ''
+        self.tool_calls = [
+            {'name': name, 'args': args, 'id': 'call_1', 'type': 'tool_call'}
+        ]
+
+
+class FakeToolLLM(FakeLLM):
+    """模拟通过工具调用表态的 LLM。"""
+
+    def __init__(self, tool_name: str, args: dict) -> None:
+        super().__init__()
+        self._tool_name = tool_name
+        self._tool_args = args
+
+    def bind_tools(self, tools):
+        return self
+
+    def invoke(self, prompt: str):
+        return _ToolResponse(self._tool_name, self._tool_args)
+
+
+def _make_app(tmp_path: Path, store: InMemoryVectorStore, llm=None):
     engine = create_db_engine('sqlite:///:memory:')
     init_db(engine)
     session_factory = create_session_factory(engine)
     app = create_app(
         session_factory=session_factory,
         vector_store=store,
-        llm=FakeLLM(),
+        llm=llm or FakeLLM(),
         embedding_model=FakeEmbeddings([1.0, 0.0]),
         upload_dir=tmp_path / 'uploads',
     )
@@ -270,6 +305,39 @@ class TestAsk:
         assert body['citations'] == first.json()['citations']
         assert body['citations'][0]['excerpt']
 
+    def test_poisoned_cache_is_invalidated(self, tmp_path: Path) -> None:
+        """缓存里混入'信息不足'式回答时，命中后应丢弃并重新回答。"""
+        app, engine = _make_app(tmp_path, InMemoryVectorStore())
+        session_factory = create_session_factory(engine)
+        with TestClient(app) as client:
+            doc = _upload_txt(client).json()
+            session_id = client.post('/api/sessions').json()['session_id']
+            payload = {'question': '张三是谁', 'document_ids': [doc['id']]}
+
+            first = client.post(f'/api/sessions/{session_id}/messages', json=payload)
+            assert first.status_code == 200
+
+            # 污染缓存：把刚生成的缓存回答改成"信息不足"式文本
+            with session_factory() as session:
+                entry = session.scalar(select(QaCacheEntry))
+                assert entry is not None
+                entry.answer = '原文中没有相关信息。'
+                session.commit()
+
+            # 再问同一问题：应拦截无效缓存并重新走 LLM 回答
+            again = client.post(f'/api/sessions/{session_id}/messages', json=payload)
+            assert again.status_code == 200
+            body = again.json()
+            assert body['needs_clarification'] is False
+            assert body['answer'] == '这是基于原文的测试回答。'
+            assert body['citations'] != []
+
+            # 缓存应已重建为有效回答
+            with session_factory() as session:
+                entry = session.scalar(select(QaCacheEntry))
+                assert entry.answer == '这是基于原文的测试回答。'
+        engine.dispose()
+
     def test_same_question_across_documents_no_conflict(self, tmp_path: Path) -> None:
         app, engine = _make_app(tmp_path, InMemoryVectorStore())
         with TestClient(app) as client:
@@ -344,4 +412,89 @@ class TestHitl:
 
             missing = client.post('/api/hitl/tasks/999/submit', json={'clarification': 'x'})
             assert missing.status_code == 404
+        engine.dispose()
+
+    def test_llm_no_info_creates_hitl_task(self, tmp_path: Path) -> None:
+        """检索到片段但 LLM 判定信息不足时，自动创建澄清任务且不记录干瘪回答。"""
+        app, engine = _make_app(tmp_path, InMemoryVectorStore(), llm=FakeNoInfoLLM())
+        with TestClient(app) as client:
+            doc = _upload_txt(client).json()
+            session_id = client.post('/api/sessions').json()['session_id']
+
+            response = client.post(
+                f'/api/sessions/{session_id}/messages',
+                json={'question': '片段中没有答案的细节问题', 'document_ids': [doc['id']]},
+            )
+
+            assert response.status_code == 200
+            body = response.json()
+            assert body['needs_clarification'] is True
+            assert body['hitl_task_id'] is not None
+            assert body['answer'] is None
+
+            # LLM 那句"原文中没有相关信息"不应写入聊天记录
+            messages = client.get(f'/api/sessions/{session_id}/messages').json()
+            assert [m['role'] for m in messages] == ['user']
+
+            tasks = client.get(
+                '/api/hitl/tasks', params={'session_id': int(session_id)}
+            ).json()
+            assert tasks[0]['status'] == HitlTask.STATUS_AWAITING
+        engine.dispose()
+
+    def test_tool_request_clarification_creates_hitl(self, tmp_path: Path) -> None:
+        """模型调用 request_clarification 工具 → 自动创建澄清任务。"""
+        app, engine = _make_app(
+            tmp_path,
+            InMemoryVectorStore(),
+            llm=FakeToolLLM(
+                'request_clarification',
+                {'missing_info': '需要少白公与舵手关系的完整原文'},
+            ),
+        )
+        with TestClient(app) as client:
+            doc = _upload_txt(client).json()
+            session_id = client.post('/api/sessions').json()['session_id']
+
+            response = client.post(
+                f'/api/sessions/{session_id}/messages',
+                json={'question': '细节问题', 'document_ids': [doc['id']]},
+            )
+
+            assert response.status_code == 200
+            body = response.json()
+            assert body['needs_clarification'] is True
+            assert body['hitl_task_id'] is not None
+            assert body['answer'] is None
+            assert len(body['citations']) == 0
+
+            messages = client.get(f'/api/sessions/{session_id}/messages').json()
+            assert [m['role'] for m in messages] == ['user']
+        engine.dispose()
+
+    def test_tool_final_answer_returns_answer(self, tmp_path: Path) -> None:
+        """模型调用 final_answer 工具 → 正常回答并记录。"""
+        app, engine = _make_app(
+            tmp_path,
+            InMemoryVectorStore(),
+            llm=FakeToolLLM('final_answer', {'answer': '根据原文，张三出场了。'}),
+        )
+        with TestClient(app) as client:
+            doc = _upload_txt(client).json()
+            session_id = client.post('/api/sessions').json()['session_id']
+
+            response = client.post(
+                f'/api/sessions/{session_id}/messages',
+                json={'question': '张三是谁', 'document_ids': [doc['id']]},
+            )
+
+            assert response.status_code == 200
+            body = response.json()
+            assert body['needs_clarification'] is False
+            assert body['answer'] == '根据原文，张三出场了。'
+            assert len(body['citations']) >= 1
+
+            messages = client.get(f'/api/sessions/{session_id}/messages').json()
+            assert [m['role'] for m in messages] == ['user', 'assistant']
+            assert messages[-1]['content'] == '根据原文，张三出场了。'
         engine.dispose()
