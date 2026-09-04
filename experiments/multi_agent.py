@@ -147,18 +147,29 @@ def build_multi_agent_graph(llm=None, retriever=None):
     return graph.compile()
 
 
+def run(question: str, llm=None, retriever=None) -> dict:
+    """跑一次多 Agent 问答，返回结构化结果（供 API / 页面调用）。"""
+    agent = build_multi_agent_graph(llm=llm, retriever=retriever)
+    result = agent.invoke({'question': question})
+    plan = result.get('plan') or {}
+    chunks = result.get('chunks') or []
+    return {
+        'question': question,
+        'plan': plan,
+        'chunks': chunks,
+        'answer': result.get('answer') or '',
+        'citations': result.get('citations') or [],
+    }
+
+
 def demo():
     print('=' * 60)
     print('多 Agent 读书问答实验（Supervisor → 检索Worker → 总结Worker）')
     print('=' * 60)
-    agent = build_multi_agent_graph()
-
-    questions = ['张三喜欢谁？', '罗辑在第三章放下了什么？']
-    for q in questions:
+    for q in ['张三喜欢谁？', '罗辑在第三章放下了什么？']:
         print(f'\n{"-" * 60}\n用户问题：{q}')
-        result = agent.invoke({'question': q})
+        result = run(q)
         print(f'\n最终回答：{result["answer"]}\n')
-
     print('\n实验完成。查看 logs/multi_agent_*.log 获取完整 trace。')
 
 

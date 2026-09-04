@@ -43,6 +43,14 @@ export const sendMessage = (sessionId, payload) =>
   apiPost(`/api/sessions/${sessionId}/messages`, payload)
 export const deleteSession = (sessionId) => apiDelete(`/api/sessions/${sessionId}`)
 
+// ---- 实验室 ----
+export const runEval = (mode, limit = 0, cases = []) =>
+  apiPost('/api/experiments/eval', { mode, limit, cases })
+export const runMultiAgent = (question) =>
+  apiPost('/api/experiments/multi-agent', { question })
+export const fetchLogs = (name, lines = 200) =>
+  apiGet(`/api/experiments/logs?name=${encodeURIComponent(name)}&lines=${lines}`)
+
 export function formatTime(iso) {
   if (!iso) return ''
   try {

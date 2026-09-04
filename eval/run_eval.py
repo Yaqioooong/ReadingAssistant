@@ -111,8 +111,14 @@ def _run_case(client: TestClient, case: dict, doc_map: dict) -> dict:
         passed = _is_honest_unanswerable(answer, needs_clar)
         fail_reason = '' if passed else '应诚实说明无法回答/走HITL，实际给出了内容或未识别'
     else:
-        passed = _answer_hits(answer, case.get('expect_keywords', []))
-        fail_reason = '' if passed else f"期望含 {case.get('expect_keywords')}"
+        keywords = case.get('expect_keywords') or []
+        if keywords:
+            passed = _answer_hits(answer, keywords)
+            fail_reason = '' if passed else f"期望含 {keywords}"
+        else:
+            # 无金标关键词（自定义题）：能给出非空回答即视为通过
+            passed = bool(answer)
+            fail_reason = '' if passed else '未能生成回答'
 
     return {
         'id': case['id'],
@@ -127,18 +133,25 @@ def _run_case(client: TestClient, case: dict, doc_map: dict) -> dict:
     }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description='RAG 问答黄金评测')
-    parser.add_argument('--mode', choices=['fake', 'real'], default='fake')
-    parser.add_argument('--limit', type=int, default=0, help='只跑前 N 条（0=全部）')
-    args = parser.parse_args()
+def run(mode: str = 'fake', limit: int = 0, cases: list[dict] | None = None) -> dict:
+    """运行评测（fake=链路冒烟 / real=真实模型），返回报告 dict，供 API 与 CLI 复用。
 
-    cases = _load_golden()
-    if args.limit:
-        cases = cases[: args.limit]
+    cases 为空时加载黄金集；也可传入自定义题目（question/expect_keywords 等）。
+    """
+    if cases is None:
+        cases = _load_golden()
+    else:
+        cases = [dict(c) for c in cases]
+        for i, c in enumerate(cases):
+            c.setdefault('id', f'custom-{i + 1}')
+            c.setdefault('document', None)
+            c.setdefault('expect_keywords', [])
+            c.setdefault('expect_unanswerable', False)
+    if limit:
+        cases = cases[: limit]
 
-    client, engine = _make_client(args.mode)
-    print(f'[eval] mode={args.mode} cases={len(cases)} 上传书籍中…')
+    client, engine = _make_client(mode)
+    print(f'[eval] mode={mode} cases={len(cases)} 上传书籍中…')
     with client:
         doc_map = _upload_books(client)
         print(f'[eval] 文档映射: {doc_map}')
@@ -161,7 +174,7 @@ def main() -> None:
     avg_latency = sum(r['latency_ms'] for r in results) / len(results) if results else 0
 
     summary = {
-        'mode': args.mode,
+        'mode': mode,
         'total': len(results),
         'passed': n_pass,
         'pass_rate': round(n_pass / len(results), 3) if results else 0,
@@ -177,7 +190,7 @@ def main() -> None:
         print(f'  {k}: {v}')
 
     REPORT_DIR.mkdir(exist_ok=True)
-    report_path = REPORT_DIR / f'eval_report_{args.mode}_{time.strftime("%Y%m%d_%H%M%S")}.json'
+    report_path = REPORT_DIR / f'eval_report_{mode}_{time.strftime("%Y%m%d_%H%M%S")}.json'
     report_path.write_text(
         json.dumps({'summary': summary, 'results': results}, ensure_ascii=False, indent=2),
         encoding='utf-8',
@@ -185,6 +198,15 @@ def main() -> None:
     print(f'\n报告已保存: {report_path}')
     if engine is not None:
         engine.dispose()
+    return {'summary': summary, 'results': results, 'report_path': str(report_path)}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description='RAG 问答黄金评测')
+    parser.add_argument('--mode', choices=['fake', 'real'], default='fake')
+    parser.add_argument('--limit', type=int, default=0, help='只跑前 N 条（0=全部）')
+    args = parser.parse_args()
+    run(mode=args.mode, limit=args.limit)
 
 
 if __name__ == '__main__':

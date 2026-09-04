@@ -3,6 +3,8 @@ import { ref, onMounted } from 'vue'
 import { getDocuments } from './api.js'
 import UploadPanel from './components/UploadPanel.vue'
 import ChatPanel from './components/ChatPanel.vue'
+import ExperimentsPanel from './components/ExperimentsPanel.vue'
+import LogsPanel from './components/LogsPanel.vue'
 
 const activeTab = ref('upload')
 const documents = ref([])
@@ -69,6 +71,12 @@ onMounted(() => {
       <button class="tab" :class="{ active: activeTab === 'chat' }" @click="activeTab = 'chat'">
         聊天问答
       </button>
+      <button class="tab" :class="{ active: activeTab === 'lab' }" @click="activeTab = 'lab'">
+        实验室
+      </button>
+      <button class="tab" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">
+        日志
+      </button>
     </nav>
     <button
       class="theme-toggle"
@@ -80,14 +88,16 @@ onMounted(() => {
     </button>
   </header>
 
-  <main :class="{ padded: activeTab === 'upload' }">
+  <main :class="{ padded: activeTab !== 'chat' }">
     <KeepAlive>
       <UploadPanel
         v-if="activeTab === 'upload'"
         :documents="documents"
         @uploaded="refreshDocuments"
       />
-      <ChatPanel v-else :documents="documents" />
+      <ChatPanel v-else-if="activeTab === 'chat'" :documents="documents" />
+      <ExperimentsPanel v-else-if="activeTab === 'lab'" />
+      <LogsPanel v-else />
     </KeepAlive>
   </main>
 </template>
