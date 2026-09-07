@@ -28,3 +28,6 @@ logs/
 # 评测产物（报告与临时 gold，不进版本库）
 eval/reports/
 eval/retrieval_gold.json
+
+# 测试临时产物
+tests/_mcp_book_tmp/
