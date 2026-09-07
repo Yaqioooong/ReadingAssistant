@@ -595,9 +595,39 @@ h2 {
 .doc-picker {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
   padding-bottom: 8px;
   border-bottom: 1px solid var(--border);
+}
+.scope-chip {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 3px 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.scope-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.scope-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-foreground, #fff);
+}
+.multi-hint {
+  font-size: 11px;
+  color: var(--accent);
+  white-space: nowrap;
 }
 .doc-picker .book-icon {
   font-size: 14px;

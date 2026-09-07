@@ -17,7 +17,7 @@ const sessions = ref([])
 const currentSessionId = ref(null)
 const messages = ref([])
 const question = ref('')
-const filterDoc = ref('')
+const selectedDocIds = ref([])  // 空数组 = 全部书籍
 const sending = ref(false)
 const messageBox = ref(null)
 const stickToBottom = ref(true)
@@ -30,6 +30,23 @@ const currentTitle = computed(() => {
 function sessionLabel(session) {
   return `会话 ${session.id.slice(0, 8)}`
 }
+
+function toggleDoc(id) {
+  const index = selectedDocIds.value.indexOf(id)
+  if (index >= 0) {
+    selectedDocIds.value.splice(index, 1)
+  } else {
+    selectedDocIds.value.push(id)
+  }
+}
+
+// 书籍被删除/刷新后，清理已失效的多选 id
+watch(
+  () => props.documents.map((d) => d.id),
+  (ids) => {
+    selectedDocIds.value = selectedDocIds.value.filter((id) => ids.includes(id))
+  },
+)
 
 async function loadSessions() {
   try {
@@ -92,7 +109,7 @@ async function send() {
     messages.value.push({ role: 'user', content: text })
     question.value = ''
     scrollToBottom()
-    const documentIds = filterDoc.value ? [filterDoc.value] : []
+    const documentIds = [...selectedDocIds.value]
     const resp = await sendMessage(currentSessionId.value, {
       question: text,
       document_ids: documentIds,
@@ -255,12 +272,28 @@ onMounted(loadSessions)
           <div class="doc-picker">
             <span class="book-icon">📚</span>
             <span class="doc-picker-label">检索范围</span>
-            <select v-model="filterDoc" class="select doc-select">
-              <option value="">全部书籍</option>
-              <option v-for="doc in documents" :key="doc.id" :value="doc.id">
-                {{ doc.filename }}
-              </option>
-            </select>
+            <button
+              type="button"
+              class="scope-chip"
+              :class="{ active: selectedDocIds.length === 0 }"
+              @click="selectedDocIds = []"
+            >
+              全部
+            </button>
+            <button
+              v-for="doc in documents"
+              :key="doc.id"
+              type="button"
+              class="scope-chip"
+              :class="{ active: selectedDocIds.includes(doc.id) }"
+              :title="doc.filename"
+              @click="toggleDoc(doc.id)"
+            >
+              {{ doc.filename }}
+            </button>
+            <span v-if="selectedDocIds.length > 1" class="multi-hint">
+              {{ selectedDocIds.length }} 本书对比
+            </span>
           </div>
           <div class="input-row">
             <textarea
