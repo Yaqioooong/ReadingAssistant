@@ -13,7 +13,10 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
-UPLOADS_DIR = Path(__file__).resolve().parents[1] / 'uploads'
+# 评测语料目录（eval/uploads，仅作读取源）。
+# 注意：不能指向仓库根 uploads/——那是应用的上传落盘目录，
+# 每次上传都会写入 uuid 前缀拷贝，语料源若与之重合会自我复制、指数膨胀。
+UPLOADS_DIR = Path(__file__).resolve().parent / 'uploads'
 GOLDEN_SET = Path(__file__).resolve().parent / 'golden_set.json'
 REPORT_DIR = Path(__file__).resolve().parent / 'reports'
 
@@ -35,7 +38,10 @@ def _make_client(mode: str) -> tuple[TestClient, object]:
         from reading_assistant.api import create_app
         return TestClient(create_app()), None
     # fake：内存库 + Fake 模型
+    import tempfile
+
     from langchain_core.embeddings import Embeddings
+
     from reading_assistant.api import create_app
     from reading_assistant.storage import create_db_engine, create_session_factory, init_db
     from reading_assistant.storage.vector_store import InMemoryVectorStore
@@ -58,7 +64,7 @@ def _make_client(mode: str) -> tuple[TestClient, object]:
         vector_store=InMemoryVectorStore(),
         llm=FakeLLM(),
         embedding_model=FakeEmbeddings(),
-        upload_dir=Path('uploads'),
+        upload_dir=Path(tempfile.mkdtemp(prefix='ra_eval_fake_')),
     )
     return TestClient(app), engine
 
@@ -68,6 +74,11 @@ def _upload_books(client: TestClient) -> dict[str, int]:
     mapping = {}
     for path in sorted(UPLOADS_DIR.glob('*')):
         if path.suffix.lower() not in ('.txt', '.epub', '.pdf', '.docx'):
+            continue
+        # 保险丝：历史遗留的 uuid 前缀累积会让文件名逼近系统上限，
+        # 超长源文件直接跳过并告警，避免整次评测崩溃（Errno 63）。
+        if len(path.name) > 120:
+            print(f'[eval] 跳过超长文件 ({len(path.name)} 字符): {path.name[:60]}...')
             continue
         resp = client.post(
             '/api/documents/upload',

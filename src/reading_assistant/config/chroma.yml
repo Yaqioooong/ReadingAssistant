@@ -6,3 +6,9 @@ allow_knowledge_file_type: ['txt','pdf','epub']
 chunk_size: 800
 chunk_overlap: 100
 separators: ["\n\n", "\n", ".", "!", "?", "。", "！", "？", " ", ""]
+
+# --- 检索模式（vector=纯稠密；hybrid=BM25+稠密 RRF 融合） ---
+retrieval_mode: hybrid
+hybrid_pool_size: 50
+rrf_k: 60
+bm25_tokenizer: jieba

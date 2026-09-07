@@ -48,6 +48,10 @@ class VectorStore(ABC):
     def delete(self, document_id: int) -> None:
         """删除指定文档的全部向量分块"""
 
+    @abstractmethod
+    def all_chunks(self) -> list[StoredChunk]:
+        """返回库内全部分块（含文本与元数据），供 BM25 索引构建。"""
+
 
 class ChromaVectorStore(VectorStore):
     """基于 chromadb 的本地持久化实现。"""
@@ -62,6 +66,7 @@ class ChromaVectorStore(VectorStore):
         self._collection = self._client.get_or_create_collection(
             name=collection_name or settings.chroma_collection_name
         )
+        self._content_version = 0  # 写入版本号：add/delete 自增，供 BM25 索引失效检测
 
     def add(self, chunks: list[StoredChunk]) -> None:
         has_embeddings = any(chunk.embedding is not None for chunk in chunks)
@@ -71,6 +76,7 @@ class ChromaVectorStore(VectorStore):
             metadatas=[chunk.metadata for chunk in chunks],
             embeddings=([chunk.embedding for chunk in chunks] if has_embeddings else None),
         )
+        self._content_version += 1
 
     def query(
         self, embedding: list[float], top_k: int = 6, where: dict | None = None
@@ -100,6 +106,33 @@ class ChromaVectorStore(VectorStore):
 
     def delete(self, document_id: int) -> None:
         self._collection.delete(where={'document_id': document_id})
+        self._content_version += 1
+
+    def all_chunks(self) -> list[StoredChunk]:
+        """Chroma 全量拉取（含文本/元数据/向量），供 BM25 索引构建。"""
+        result = self._collection.get(include=['documents', 'metadatas', 'embeddings'])
+        ids = result.get('ids') or []
+        documents = result.get('documents') or []
+        metadatas = result.get('metadatas') or []
+        embeddings = result.get('embeddings')
+        chunks = []
+        for index, chunk_id in enumerate(ids):
+            embedding = None
+            if embeddings is not None and index < len(embeddings) and embeddings[index] is not None:
+                embedding = list(embeddings[index])
+            chunks.append(
+                StoredChunk(
+                    id=str(chunk_id),
+                    text=str(documents[index] or '') if index < len(documents) else '',
+                    metadata=(
+                        dict(metadatas[index])
+                        if index < len(metadatas) and metadatas[index]
+                        else {}
+                    ),
+                    embedding=embedding,
+                )
+            )
+        return chunks
 
 
 class InMemoryVectorStore(VectorStore):
@@ -107,10 +140,12 @@ class InMemoryVectorStore(VectorStore):
 
     def __init__(self) -> None:
         self._chunks: dict[str, StoredChunk] = {}
+        self._content_version = 0
 
     def add(self, chunks: list[StoredChunk]) -> None:
         for chunk in chunks:
             self._chunks[chunk.id] = chunk
+        self._content_version += 1
 
     def query(
         self, embedding: list[float], top_k: int = 6, where: dict | None = None
@@ -137,6 +172,11 @@ class InMemoryVectorStore(VectorStore):
         for chunk_id in list(self._chunks):
             if self._chunks[chunk_id].metadata.get('document_id') == document_id:
                 del self._chunks[chunk_id]
+        self._content_version += 1
+
+    def all_chunks(self) -> list[StoredChunk]:
+        """内存实现：直接返回全部分块。"""
+        return list(self._chunks.values())
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:

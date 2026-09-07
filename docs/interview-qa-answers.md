@@ -518,3 +518,4 @@
 - 2026-09-04：追加题 19（Skill 加载机制与系统 prompt 设计，补空档）。
 - 2026-09-04：追加题 11（多参数工具调用准确率，补空档）。
 - 2026-09-04：附录：项目补充场景路线图。
+- 2026-09-04：落地路线图第一梯队——混合检索（BM25+稠密 RRF，retrieval_mode 默认 vector 保守开启）+ 检索评测工具（eval/build_retrieval_gold.py、eval/run_retrieval_eval.py）。

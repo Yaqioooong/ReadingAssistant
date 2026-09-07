@@ -5,14 +5,14 @@ from datetime import datetime, timedelta, timezone
 from typing import TypedDict
 
 from langchain_core.embeddings import Embeddings
+from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
-from langchain_core.tools import tool
 from sqlalchemy.orm import Session, sessionmaker
 
 from reading_assistant.config import get_settings
 from reading_assistant.model.factory import get_chat_model, get_embedding_model
-from reading_assistant.rag import Retriever
+from reading_assistant.rag import create_retriever
 from reading_assistant.storage import (
     ChatMessage,
     create_hitl_task,
@@ -180,7 +180,7 @@ def build_qa_graph(
     ``llm`` 与 ``embedding_model`` 可注入（测试用 mock）；缺省使用配置的真实模型。
     """
     chat_model = llm or get_chat_model()
-    retriever = Retriever(vector_store, embedding_model or get_embedding_model())
+    retriever = create_retriever(vector_store, embedding_model or get_embedding_model())
 
     def cache_check(state: QAState) -> dict:
         settings = get_settings()

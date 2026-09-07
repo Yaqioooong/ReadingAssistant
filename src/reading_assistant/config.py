@@ -53,6 +53,12 @@ class Settings(BaseSettings):
     vector_store_backend: str = 'chroma'
     top_k: int = int(_chroma_cfg.get('k', 6))
     retrieval_min_score: float = float(_chroma_cfg.get('min_score', 0.45))
+    # 检索模式：'vector'（纯稠密，默认）| 'hybrid'（BM25 + 稠密 + RRF 融合）
+    retrieval_mode: str = _chroma_cfg.get('retrieval_mode', 'vector')
+    # hybrid 每路候选池大小与 RRF 融合常数
+    hybrid_pool_size: int = int(_chroma_cfg.get('hybrid_pool_size', 50))
+    rrf_k: int = int(_chroma_cfg.get('rrf_k', 60))
+    bm25_tokenizer: str = _chroma_cfg.get('bm25_tokenizer', 'jieba')
     data_path: str = _chroma_cfg.get('data_path', 'data')
     allow_knowledge_file_type: list[str] = _chroma_cfg.get(
         'allow_knowledge_file_type', ['txt', 'pdf', 'epub']
