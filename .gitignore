@@ -24,3 +24,7 @@ chroma_data/
 rag/chroma_db/
 logs/
 .alma-snapshots
+
+# 评测产物（报告与临时 gold，不进版本库）
+eval/reports/
+eval/retrieval_gold.json

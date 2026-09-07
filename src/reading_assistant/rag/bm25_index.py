@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 from rank_bm25 import BM25Okapi
@@ -52,6 +53,7 @@ class BM25Index:
         self._vector_store = vector_store
         self._tokenizer = tokenize if (tokenize := _default_tokenizer()) else None
         self._data: _IndexData | None = None
+        self._lock = threading.Lock()  # 懒重建互斥
 
     @classmethod
     def get_for(cls, vector_store: VectorStore, tokenizer: str = 'jieba') -> 'BM25Index':
@@ -89,9 +91,21 @@ class BM25Index:
 
     def _ensure_fresh(self) -> None:
         version, count = self._signature()
-        if self._data is not None and self._data.version == version and self._data.count == count:
+        if (
+            self._data is not None
+            and self._data.version == version
+            and self._data.count == count
+        ):
             return
-        self._rebuild()
+        with self._lock:
+            version, count = self._signature()
+            if (
+                self._data is not None
+                and self._data.version == version
+                and self._data.count == count
+            ):
+                return
+            self._rebuild()
 
     def refresh(self) -> None:
         """强制重建（内容级变更但 chunk 数量不变的场景由调用方主动触发）。"""

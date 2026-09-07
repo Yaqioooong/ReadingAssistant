@@ -28,8 +28,9 @@ HONEST_UNANSWERABLE = (
 )
 
 
-def _load_golden() -> list[dict]:
-    data = json.loads(GOLDEN_SET.read_text(encoding='utf-8'))
+def _load_golden(path: Path | None = None) -> list[dict]:
+    source = path or GOLDEN_SET
+    data = json.loads(source.read_text(encoding='utf-8'))
     return data['cases']
 
 
@@ -106,7 +107,12 @@ def _is_honest_unanswerable(answer: str | None, needs_clarification: bool) -> bo
 def _run_case(client: TestClient, case: dict, doc_map: dict) -> dict:
     session_id = client.post('/api/sessions').json()['session_id']
     doc_name = case.get('document')
-    doc_ids = [doc_map[doc_name]] if doc_name and doc_name in doc_map else []
+    multi_names = case.get('documents') or []
+    if multi_names:
+        doc_ids = [doc_map[n] for n in multi_names if n in doc_map]
+        doc_name = ','.join(multi_names)
+    else:
+        doc_ids = [doc_map[doc_name]] if doc_name and doc_name in doc_map else []
     start = time.perf_counter()
     resp = client.post(
         f'/api/sessions/{session_id}/messages',
@@ -144,13 +150,19 @@ def _run_case(client: TestClient, case: dict, doc_map: dict) -> dict:
     }
 
 
-def run(mode: str = 'fake', limit: int = 0, cases: list[dict] | None = None) -> dict:
+def run(
+    mode: str = 'fake',
+    limit: int = 0,
+    cases: list[dict] | None = None,
+    golden_path: Path | None = None,
+) -> dict:
     """运行评测（fake=链路冒烟 / real=真实模型），返回报告 dict，供 API 与 CLI 复用。
 
-    cases 为空时加载黄金集；也可传入自定义题目（question/expect_keywords 等）。
+    cases 为空时加载黄金集（可用 golden_path 指定其他评测文件，如多文档用例）；
+    也可传入自定义题目（question/expect_keywords 等）。
     """
     if cases is None:
-        cases = _load_golden()
+        cases = _load_golden(golden_path)
     else:
         cases = [dict(c) for c in cases]
         for i, c in enumerate(cases):
@@ -216,8 +228,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='RAG 问答黄金评测')
     parser.add_argument('--mode', choices=['fake', 'real'], default='fake')
     parser.add_argument('--limit', type=int, default=0, help='只跑前 N 条（0=全部）')
+    parser.add_argument(
+        '--golden', type=Path, default=None, help='自定义黄金集路径（默认 golden_set.json）'
+    )
     args = parser.parse_args()
-    run(mode=args.mode, limit=args.limit)
+    run(mode=args.mode, limit=args.limit, golden_path=args.golden)
 
 
 if __name__ == '__main__':

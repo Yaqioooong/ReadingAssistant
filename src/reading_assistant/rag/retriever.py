@@ -1,6 +1,7 @@
 """检索器：Embedding + 向量库 top-k 检索。"""
 
 import math
+import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 
@@ -42,6 +43,7 @@ class Retriever:
         self._embed_cache: OrderedDict[str, list[float]] = OrderedDict()
         self._embed_cache_enabled = settings.cache_enabled
         self._embed_cache_max = settings.cache_max_entries
+        self._embed_lock = threading.Lock()  # 多文档 fan-out 并发读取保护
 
     def retrieve(
         self,
@@ -81,13 +83,16 @@ class Retriever:
         if not self._embed_cache_enabled:
             return self._embedding_model.embed_query(query)
         key = sha256_hex(normalize_question(query))
-        if key in self._embed_cache:
-            self._embed_cache.move_to_end(key)  # LRU语义
-            return self._embed_cache[key]
+        with self._embed_lock:
+            if key in self._embed_cache:
+                self._embed_cache.move_to_end(key)  # LRU语义
+                return self._embed_cache[key]
+        # 模型调用放在锁外，避免 fan-out 线程被串行化
         vector = self._embedding_model.embed_query(normalize_question(query))
-        self._embed_cache[key] = vector
-        if len(self._embed_cache) > self._embed_cache_max:
-            self._embed_cache.popitem(last=False)  # 淘汰最久未使用的key
+        with self._embed_lock:
+            self._embed_cache[key] = vector
+            if len(self._embed_cache) > self._embed_cache_max:
+                self._embed_cache.popitem(last=False)  # 淘汰最久未使用的key
         return vector
 
 
