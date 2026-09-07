@@ -37,6 +37,7 @@ class CitationOut(BaseModel):
     chapter: str | None = None
     page: int | None = None
     excerpt: str = ''
+    document: str | None = None  # 来源书名（多文档问答时填充）
 
 
 class MessageOut(BaseModel):

@@ -18,6 +18,7 @@ from reading_assistant.storage import (
     create_hitl_task,
     get_document,
     get_qa_cache_entry,
+    list_documents,
     list_qa_cache_entries,
     normalize_question,
     prune_qa_cache,
@@ -37,6 +38,8 @@ class QAState(TypedDict, total=False):
     question: str
     session_id: int | None
     document_id: int | None
+    document_ids: list[int] | None
+    doc_titles: dict[int, str] | None
     clarification: str | None
     chunks: list[dict]
     needs_clarification: bool
@@ -61,12 +64,18 @@ def _chunk_to_dict(chunk) -> dict:
 
 
 def _build_answer_prompt(
-    question: str, chunks: list[dict], clarification: str | None = None
+    question: str,
+    chunks: list[dict],
+    clarification: str | None = None,
+    doc_titles: dict[int, str] | None = None,
 ) -> str:
-    if chunks:
-        context = '\n\n'.join(
-            f'[{index}]\n{chunk["text"]}' for index, chunk in enumerate(chunks, start=1)
-        )
+    labeled: list[str] = []
+    for index, chunk in enumerate(chunks, start=1):
+        title = doc_titles.get(chunk.get('document_id')) if doc_titles else None
+        prefix = f'《{title}》\n' if title else ''
+        labeled.append(f'[{index}]\n{prefix}{chunk["text"]}')
+    if labeled:
+        context = '\n\n'.join(labeled)
     else:
         context = '（未检索到相关原文片段）'
     lines = [
@@ -88,6 +97,11 @@ def _build_answer_prompt(
             ),
         ]
     )
+    if doc_titles and len(doc_titles) > 1:
+        lines.append(
+            '注意：本次问题涉及多本书籍。回答时请明确区分不同书籍各自的内容/立场，'
+            '原文片段前已标注书名《...》，引用时对应到正确的书籍。'
+        )
     return '\n\n'.join(lines)
 
 
@@ -183,6 +197,9 @@ def build_qa_graph(
     retriever = create_retriever(vector_store, embedding_model or get_embedding_model())
 
     def cache_check(state: QAState) -> dict:
+        if len(state.get('document_ids') or []) > 1:
+            # 多文档问答缓存键需绑定全部文档版本，MVP 直接跳过缓存（每次实时检索）
+            return {'cache_hit': False, 'question_hash': None}
         settings = get_settings()
         if not settings.cache_enabled:
             return {'cache_hit': False, 'question_hash': None}
@@ -272,10 +289,43 @@ def build_qa_graph(
         question = state['question']
         if state.get('clarification'):
             question = f'{question}\n补充说明：{state["clarification"]}'
+        doc_ids = state.get('document_ids') or []
+        if len(doc_ids) > 1:
+            # 多文档问答：并行 fan-out，每书独立检索后按相似度合流取全局 top_k
+            from concurrent.futures import ThreadPoolExecutor
+
+            settings = get_settings()
+            total_k = settings.top_k
+            per_doc = max(2, -(-total_k // len(doc_ids)))  # 按文档数 ceil 分配
+
+            def _retrieve_one(doc_id: int):
+                return retriever.retrieve(question, top_k=per_doc, document_id=doc_id)
+
+            with ThreadPoolExecutor(max_workers=min(len(doc_ids), 8)) as executor:
+                grouped = list(executor.map(_retrieve_one, doc_ids))
+            merged = sorted(
+                (hit for group in grouped for hit in group),
+                key=lambda hit: hit.score,
+                reverse=True,
+            )[:total_k]
+            titles: dict[int, str] = {}
+            with session_scope(session_factory) as session:
+                for document in list_documents(session):
+                    if document.id in doc_ids:
+                        titles[document.id] = document.filename
+            logger.info('问答[检索] q=%.30s docs=%s merged=%d', question, doc_ids, len(merged))
+            return {'chunks': [_chunk_to_dict(hit) for hit in merged], 'doc_titles': titles}
         hits = retriever.retrieve(question, document_id=state.get('document_id'))
+        titles: dict[int, str] = {}
+        doc_id = state.get('document_id')
+        if doc_id is not None:
+            with session_scope(session_factory) as session:
+                document = get_document(session, doc_id)
+                if document is not None:
+                    titles[document.id] = document.filename
         logger.info('问答[检索] q=%.30s doc=%s hit=%d', question,
                     state.get('document_id'), len(hits))
-        return {'chunks': [_chunk_to_dict(hit) for hit in hits]}
+        return {'chunks': [_chunk_to_dict(hit) for hit in hits], 'doc_titles': titles or None}
 
     def judge(state: QAState) -> dict:
         # 有澄清说明时视为信息已补充；否则无检索结果即为信息不足
@@ -312,6 +362,7 @@ def build_qa_graph(
             question=state['question'],
             chunks=state.get('chunks') or [],
             clarification=state.get('clarification'),
+            doc_titles=state.get('doc_titles'),
         )
         start = time.perf_counter()
         tool_calls = []
@@ -354,15 +405,18 @@ def build_qa_graph(
                 logger.info('问答[answer] 文本兜底判定信息不足，转入 HITL q=%.30s',
                             state['question'])
                 return {'needs_clarification': True, 'answer': None, 'citations': []}
-        citations = [
-            {
-                'chunk_id': chunk['chunk_id'],
-                'chapter': chunk.get('chapter'),
-                'page': None,
-                'excerpt': chunk['text'][:120],
-            }
-            for chunk in (state.get('chunks') or [])
-        ]
+        titles = state.get('doc_titles') or {}
+        citations = []
+        for chunk in state.get('chunks') or []:
+            citations.append(
+                {
+                    'chunk_id': chunk['chunk_id'],
+                    'chapter': chunk.get('chapter'),
+                    'page': None,
+                    'excerpt': chunk['text'][:120],
+                    'document': titles.get(chunk.get('document_id')),
+                }
+            )
         settings = get_settings()
         if settings.cache_enabled and state.get('question_hash') and not state.get('cache_hit'):
             with session_scope(session_factory) as session:

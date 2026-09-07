@@ -16,11 +16,10 @@ from reading_assistant.api.deps import (
 )
 from reading_assistant.graph import build_qa_graph
 from reading_assistant.storage import ChatMessage, ChatSession, delete_session
+from reading_assistant.storage.vector_store import VectorStore
 from reading_assistant.utils.logger_handler import get_logger
 
-
 logger = get_logger('api')
-from reading_assistant.storage.vector_store import VectorStore
 
 router = APIRouter(prefix='/api/sessions', tags=['sessions'])
 
@@ -87,8 +86,10 @@ def ask_question(
     import time
 
     _ensure_session(session, session_id)
-    document_id = payload.document_ids[0] if payload.document_ids else None
-    logger.info('提问 session_id=%s doc=%s q=%.40s', session_id, document_id, payload.question)
+    doc_ids = payload.document_ids or []
+    # 单文档走原 document_id 路径（缓存友好）；多文档走 fan-out 并行检索
+    document_id = doc_ids[0] if len(doc_ids) == 1 else None
+    logger.info('提问 session_id=%s docs=%s q=%.40s', session_id, doc_ids, payload.question)
     start = time.perf_counter()
     graph = build_qa_graph(
         session_factory,
@@ -96,13 +97,16 @@ def ask_question(
         llm=llm,
         embedding_model=embedding_model,
     )
+    invoke_state: dict = {
+        'question': payload.question,
+        'session_id': session_id,
+        'document_id': document_id,
+        'clarification': payload.clarification,
+    }
+    if len(doc_ids) > 1:
+        invoke_state['document_ids'] = doc_ids
     result = graph.invoke(
-        {
-            'question': payload.question,
-            'session_id': session_id,
-            'document_id': document_id,
-            'clarification': payload.clarification,
-        },
+        invoke_state,
         config={'configurable': {'thread_id': f'qa-{uuid4().hex}'}},
     )
     cost_ms = (time.perf_counter() - start) * 1000
