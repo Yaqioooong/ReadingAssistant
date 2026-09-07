@@ -128,8 +128,9 @@ class TestRetriever:
         assert hits[0].chunk_id == 'c1'
 
     def test_retrieve_filters_low_similarity(self, monkeypatch) -> None:
-        from reading_assistant.rag.retriever import Retriever
         from types import SimpleNamespace
+
+        from reading_assistant.rag.retriever import Retriever
 
         monkeypatch.setattr(
             'reading_assistant.rag.retriever.get_settings',

@@ -6,10 +6,9 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.embeddings import Embeddings
-
-from reading_assistant.api import create_app
 from sqlalchemy import select
 
+from reading_assistant.api import create_app
 from reading_assistant.storage import (
     Document,
     HitlTask,
