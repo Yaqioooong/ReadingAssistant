@@ -92,6 +92,7 @@ dev = [
 
 [project.scripts]
 readingassistant = "reading_assistant.cli:app"
+readingassistant-mcp = "reading_assistant.mcp.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

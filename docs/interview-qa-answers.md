@@ -519,4 +519,5 @@
 - 2026-09-04：追加题 11（多参数工具调用准确率，补空档）。
 - 2026-09-04：附录：项目补充场景路线图。
 - 2026-09-04：落地路线图第一梯队——混合检索（BM25+稠密 RRF，retrieval_mode 默认 vector 保守开启）+ 检索评测工具（eval/build_retrieval_gold.py、eval/run_retrieval_eval.py）。
+- 2026-09-07：MCP Server 封装完成（list_books/upload_book/ask_book/reindex_book，`uv run readingassistant-mcp` stdio）。real 检索 A/B：vector vs hybrid 在 golden 上 1.000 对等（gold 由引用弱标注自生成、存在天花板，无回归即达标）。
 - 2026-09-07：落地路线图第二梯队——多文档对比问答：document_ids 多选 → 并行 fan-out 检索 → 合流 synthesis；引用带书名；eval/golden_multi_doc.json 跨书评测；单文档/缓存路径零回归。
