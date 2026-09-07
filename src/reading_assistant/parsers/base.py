@@ -6,6 +6,11 @@ from pathlib import Path
 
 from reading_assistant.utils.path_tools import get_abs_path
 
+# 解析器用这对哨兵在章节内容里包裹 Markdown 表格块（不可切分单元），
+# chunk 层识别后整表入库。定义在 base 层避免解析器依赖 rag 造成循环导入。
+TABLE_BEGIN = '%%TABLE_BEGIN%%'
+TABLE_END = '%%TABLE_END%%'
+
 
 class ParseError(Exception):
     """解析失败（文件缺失、损坏或不支持）。"""

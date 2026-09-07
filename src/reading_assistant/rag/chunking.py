@@ -1,11 +1,13 @@
 """文本分块：按 separators 切分并保留章节元数据。"""
 
+import re
 from dataclasses import dataclass, field
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from reading_assistant.config import get_settings
 from reading_assistant.parsers import ParsedBook
+from reading_assistant.parsers.base import TABLE_BEGIN, TABLE_END
 
 
 @dataclass
@@ -36,23 +38,67 @@ def chunk_text(
     return [piece for piece in splitter.split_text(text) if piece.strip()]
 
 
+# 表格是"不可切分单元"——整表作为单个 chunk 入库，避免被分块器从行中间腰斩。
+_TABLE_BLOCK_RE = re.compile(
+    r'\s*' + re.escape(TABLE_BEGIN) + r'\n(.*?)\n\s*' + re.escape(TABLE_END), re.S
+)
+
+
+def _split_table_blocks(content: str) -> list[tuple[str, str]]:
+    """把章节内容切成 (kind, text) 段：'table' 原子块 / 'text' 普通段落。"""
+    segments: list[tuple[str, str]] = []
+    pos = 0
+    for match in _TABLE_BLOCK_RE.finditer(content):
+        before = content[pos : match.start()]
+        if before.strip():
+            segments.append(('text', before))
+        table = match.group(1).strip()
+        if table:
+            segments.append(('table', table))
+        pos = match.end()
+    tail = content[pos:]
+    if tail.strip():
+        segments.append(('text', tail))
+    return segments
+
+
 def chunk_book(
     book: ParsedBook,
     chunk_size: int | None = None,
     chunk_overlap: int | None = None,
     separators: list[str] | None = None,
 ) -> list[TextChunk]:
-    """按章节分块，在元数据中记录章节序号与标题。"""
+    """按章节分块，在元数据中记录章节序号与标题。
+
+    表格块（由哨兵包裹）作为不可切分单元整块入库：单行不被腰斩、
+    单元格数据不散落到不同 chunk；代价是超长表格块不参与 800 字切分
+    （对常见书籍表格可接受）。
+    """
     chunks: list[TextChunk] = []
     index = 0
     for chapter_index, chapter in enumerate(book.chapters):
-        for piece in chunk_text(chapter.content, chunk_size, chunk_overlap, separators):
-            chunks.append(
-                TextChunk(
-                    text=piece,
-                    index=index,
-                    metadata={'chapter_index': chapter_index, 'chapter': chapter.title},
+        for kind, segment in _split_table_blocks(chapter.content):
+            if kind == 'table':
+                chunks.append(
+                    TextChunk(
+                        text=segment,
+                        index=index,
+                        metadata={
+                            'chapter_index': chapter_index,
+                            'chapter': chapter.title,
+                            'block_type': 'table',
+                        },
+                    )
                 )
-            )
-            index += 1
+                index += 1
+                continue
+            for piece in chunk_text(segment, chunk_size, chunk_overlap, separators):
+                chunks.append(
+                    TextChunk(
+                        text=piece,
+                        index=index,
+                        metadata={'chapter_index': chapter_index, 'chapter': chapter.title},
+                    )
+                )
+                index += 1
     return chunks
