@@ -28,9 +28,33 @@ GOLD_FILE = EVAL_DIR / 'retrieval_gold.json'
 TOP_K_VALUES = (5, 10, 20)
 
 
-def _load_gold() -> list[dict]:
-    data = json.loads(GOLD_FILE.read_text(encoding='utf-8'))
+def _load_gold(path: Path | None = None) -> list[dict]:
+    source = path or GOLD_FILE
+    data = json.loads(source.read_text(encoding='utf-8'))
     return data['cases']
+
+
+def _gold_ids_from_contains(
+    case: dict, doc_map: dict[str, int], chunks_all: list
+) -> list[str]:
+    """按 must_contain 短语在原文中定位 gold chunk（非引用弱标注）。
+
+    用于词面鲁棒性评测集：phrase 命中的 chunk 即应当召回的 ground truth。
+    """
+    phrase = case.get('contains')
+    if not phrase:
+        return []
+    doc_ids: list[int] = []
+    names = case.get('documents') or ([case['document']] if case.get('document') else [])
+    for name in names:
+        if name in doc_map:
+            doc_ids.append(doc_map[name])
+    return [
+        chunk.id
+        for chunk in chunks_all
+        if phrase in (chunk.text or '')
+        and (not doc_ids or chunk.metadata.get('document_id') in doc_ids)
+    ]
 
 
 def _make_real_env() -> tuple[list[dict], object, object]:
@@ -97,8 +121,8 @@ def _case_metrics(retrieved: list[str], gold: list[str]) -> dict:
     return {'hit': 1 if hit_count else 0, 'recall': recall, 'mrr': mrr, 'n': n}
 
 
-def run(mode: str = 'real') -> dict:
-    gold = _load_gold()
+def run(mode: str = 'real', gold_file: Path | None = None) -> dict:
+    gold = _load_gold(gold_file)
     doc_map, store, embedding = _make_real_env() if mode == 'real' else _make_fake_env()
 
     from reading_assistant.rag import HybridRetriever, Retriever
@@ -117,10 +141,16 @@ def run(mode: str = 'real') -> dict:
     }
     per_case: list[dict] = []
     print(f'[retrieval-eval] mode={mode} gold_cases={len(gold)} topk={TOP_K_VALUES}')
+    chunks_all = store.all_chunks()
     for case in gold:
         question = case['question']
         doc_id = resolve_document_id(case)
-        gold_ids = case['chunk_ids']
+        gold_ids = list(case.get('chunk_ids') or [])
+        if not gold_ids:
+            gold_ids = _gold_ids_from_contains(case, doc_map, chunks_all)
+        if not gold_ids:
+            print(f"  [skip] {case['id']:12s} 无 gold（短语未命中或文档缺失），不计入统计")
+            continue
         row = {'id': case['id'], 'gold_chunks': len(gold_ids), 'doc': case['document']}
         for system, retriever in (('vector', vector_r), ('hybrid', hybrid_r)):
             retrieved = _retrieved_ids(retriever, question, doc_id, max(TOP_K_VALUES))
@@ -139,12 +169,12 @@ def run(mode: str = 'real') -> dict:
         line += f" | vector MRR={v_mrr:.3f} hybrid MRR={h_mrr:.3f}"
         print(line)
 
-    n_cases = len(gold) or 1
+    n_cases = len(per_case) or 1
     print('\n=== 汇总（均值） ===')
     head = f"{'':8s} {'Recall@5':>10s} {'Recall@10':>11s} {'Recall@20':>11s}"
     head += f" {'Hit@5':>7s} {'Hit@10':>8s} {'Hit@20':>8s} {'MRR':>6s}"
     print(head)
-    aggregated = {'mode': mode, 'cases': len(gold)}
+    aggregated = {'mode': mode, 'cases': len(per_case)}
     for system in ('vector', 'hybrid'):
         vals = {}
         for n in TOP_K_VALUES:
@@ -174,8 +204,14 @@ def run(mode: str = 'real') -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description='检索级评测：vector vs hybrid')
     parser.add_argument('--mode', choices=['fake', 'real'], default='real')
+    parser.add_argument(
+        '--gold-file',
+        type=Path,
+        default=GOLD_FILE,
+        help='评测集路径（默认 retrieval_gold.json；支持 contains 词面定位用例）',
+    )
     args = parser.parse_args()
-    run(mode=args.mode)
+    run(mode=args.mode, gold_file=args.gold_file)
 
 
 if __name__ == '__main__':
