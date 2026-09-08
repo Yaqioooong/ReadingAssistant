@@ -18,7 +18,25 @@ const currentSessionId = ref(null)
 const messages = ref([])
 const question = ref('')
 const selectedDocIds = ref([])  // 空数组 = 全部书籍
+const scopeOpen = ref(false)
+const scopeSearch = ref('')
 const sending = ref(false)
+
+const filteredDocs = computed(() => {
+  const query = scopeSearch.value.trim().toLowerCase()
+  if (!query) return props.documents
+  return props.documents.filter((doc) => doc.filename.toLowerCase().includes(query))
+})
+
+const scopeLabel = computed(() => {
+  const n = selectedDocIds.value.length
+  if (!n) return '全部书籍'
+  if (n === 1) {
+    const doc = props.documents.find((d) => d.id === selectedDocIds.value[0])
+    return doc ? doc.filename : '已选 1 本'
+  }
+  return `已选 ${n} 本`
+})
 const messageBox = ref(null)
 const stickToBottom = ref(true)
 
@@ -274,26 +292,55 @@ onMounted(loadSessions)
             <span class="doc-picker-label">检索范围</span>
             <button
               type="button"
-              class="scope-chip"
-              :class="{ active: selectedDocIds.length === 0 }"
-              @click="selectedDocIds = []"
+              class="scope-trigger"
+              :class="{ open: scopeOpen }"
+              @click.stop="scopeOpen = !scopeOpen"
             >
-              全部
+              <span class="scope-trigger-label">{{ scopeLabel }}</span>
+              <span class="scope-trigger-arrow" :class="{ open: scopeOpen }">▾</span>
             </button>
-            <button
-              v-for="doc in documents"
-              :key="doc.id"
-              type="button"
-              class="scope-chip"
-              :class="{ active: selectedDocIds.includes(doc.id) }"
-              :title="doc.filename"
-              @click="toggleDoc(doc.id)"
-            >
-              {{ doc.filename }}
-            </button>
-            <span v-if="selectedDocIds.length > 1" class="multi-hint">
-              {{ selectedDocIds.length }} 本书对比
-            </span>
+            <span v-if="selectedDocIds.length > 1" class="multi-hint">对比 {{ selectedDocIds.length }} 本</span>
+          </div>
+
+          <div v-if="scopeOpen" class="scope-backdrop" @mousedown="scopeOpen = false"></div>
+          <div v-if="scopeOpen" class="scope-menu">
+            <div class="scope-menu-head">
+              <button
+                type="button"
+                class="scope-option all"
+                :class="{ active: selectedDocIds.length === 0 }"
+                @click="selectedDocIds = []; scopeOpen = false"
+              >
+                <span class="check">{{ selectedDocIds.length === 0 ? '✓' : '' }}</span>
+                <span class="name">全部书籍</span>
+              </button>
+              <span class="scope-count muted">{{ selectedDocIds.length }}/{{ documents.length }}</span>
+            </div>
+            <input
+              v-model="scopeSearch"
+              class="scope-search"
+              type="text"
+              placeholder="搜索书名…"
+            />
+            <div class="scope-list">
+              <button
+                v-for="doc in filteredDocs"
+                :key="doc.id"
+                type="button"
+                class="scope-option"
+                :class="{ active: selectedDocIds.includes(doc.id) }"
+                :title="doc.filename"
+                @click="toggleDoc(doc.id)"
+              >
+                <span class="check">{{ selectedDocIds.includes(doc.id) ? '✓' : '' }}</span>
+                <span class="name">{{ doc.filename }}</span>
+                <span class="meta muted">{{ doc.chunk_count }} 块</span>
+              </button>
+              <p v-if="!filteredDocs.length" class="scope-empty muted">没有匹配的书籍</p>
+            </div>
+            <p v-if="documents.length" class="scope-menu-foot muted">
+              支持多选：跨书对比问答，引用会按书名分别标注
+            </p>
           </div>
           <div class="input-row">
             <textarea
@@ -307,7 +354,7 @@ onMounted(loadSessions)
             </button>
           </div>
         </div>
-        <p class="input-hint">回答基于已上传书籍内容，可在输入框上方选择检索范围</p>
+        <p class="input-hint">回答基于已上传书籍内容；「检索范围」可多选，跨书自动对比并标注引用来源</p>
       </div>
     </div>
   </div>

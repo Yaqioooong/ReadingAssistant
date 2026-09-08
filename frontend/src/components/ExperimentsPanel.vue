@@ -76,12 +76,52 @@ async function runAgent() {
 
 <template>
   <div class="lab">
+    <!-- ============ 0. 页首导语 ============ -->
+    <section class="lab-hero">
+      <div class="lab-hero-badges">
+        <span class="tag-chip experimental">实验性 · Experimental</span>
+        <span class="tag-chip">与生产链路同源</span>
+      </div>
+      <h1 class="lab-hero-title">🧪 实验室</h1>
+      <p class="lab-hero-desc">
+        面向工程验证的工作台，两块能力：<b>量化评测 RAG 质量</b> 与 <b>演练多 Agent 协作范式</b>。
+        所有实验复用生产的解析 / 入库 / 检索 / 问答链路，输出结构化报告，可作为迭代与验收的量化依据。
+      </p>
+      <div class="lab-hero-grid">
+        <div class="lab-hero-point">
+          <span class="ph-ico">🎯</span>
+          <div>
+            <b>评测方法论</b>
+            <p>黄金集四题型（正向 / 陷阱 / 信息不足 / 全库）× fake 冒烟与 real 真实链路双模式 × 四指标量化（准确率 · 不可答识别 · 引用覆盖 · 延迟）</p>
+          </div>
+        </div>
+        <div class="lab-hero-point">
+          <span class="ph-ico">🤝</span>
+          <div>
+            <b>多 Agent 协作范式</b>
+            <p>Supervisor 通过函数调用规划检索范围 → 检索 Worker 召回 → 总结 Worker 带引用作答；共享生产问答图的检索与引用链路</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- ============ 1. 评测中心 ============ -->
     <section class="card">
-      <h2>🧪 RAG 评测中心</h2>
-      <p class="muted lab-desc">
-        黄金集 15 题（陷阱/信息不足/全库）或自定义题目，跑一遍看质量指标与每题明细。
-      </p>
+      <div class="lab-head">
+        <div>
+          <h2 class="lab-head-title">RAG 评测中心</h2>
+          <p class="muted lab-desc">
+            黄金集 15 题（正向 / 陷阱 / 信息不足 / 全库四类）或自定义题目；一键跑通端到端 API 链路，
+            产出质量指标与逐题明细，报告自动落盘 <code>eval/reports/</code>。
+          </p>
+        </div>
+        <div class="lab-head-tags">
+          <span class="tag-chip">15 题黄金集</span>
+          <span class="tag-chip">fake 冒烟</span>
+          <span class="tag-chip">real 真实链路</span>
+          <span class="tag-chip">四指标量化</span>
+        </div>
+      </div>
 
       <div class="lab-controls">
         <span class="ctl-label">模型：</span>
@@ -158,10 +198,20 @@ async function runAgent() {
 
     <!-- ============ 2. 多 Agent 工作台 ============ -->
     <section class="card">
-      <h2>🤖 多 Agent 协作问答</h2>
-      <p class="muted lab-desc">
-        Supervisor 规划 → 检索 Worker → 总结 Worker 三级协作。点预设或自由输入你的问题。
-      </p>
+      <div class="lab-head">
+        <div>
+          <h2 class="lab-head-title">多 Agent 协作问答</h2>
+          <p class="muted lab-desc">
+            演练 <b>Supervisor → Worker</b> 编排范式：Supervisor 用函数调用（make_plan）输出检索计划（范围 + 检索词 + 理由），
+            检索 Worker 执行召回，总结 Worker 综合作答。每一步状态可观测，便于对照“流水线 vs 多 Agent”的取舍。
+          </p>
+        </div>
+        <div class="lab-head-tags">
+          <span class="tag-chip">函数调用规划</span>
+          <span class="tag-chip">Supervisor / Worker</span>
+          <span class="tag-chip">结构化计划可审计</span>
+        </div>
+      </div>
       <div class="lab-controls wrap">
         <button
           v-for="q in presetQuestions"
@@ -247,3 +297,45 @@ async function runAgent() {
 .badge.ok { color: var(--ok); border: 1px solid var(--ok); border-radius: 999px; padding: 1px 8px; font-size: 12px; }
 .badge.err { color: var(--err); border: 1px solid var(--err); border-radius: 999px; padding: 1px 8px; font-size: 12px; }
 </style>
+
+/* 实验台页 */
+.lab { max-width: 1020px; }
+.lab-hero {
+  background: linear-gradient(135deg, var(--accent-weak), transparent 62%), var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 22px 24px;
+}
+.lab-hero-badges { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+.tag-chip {
+  display: inline-flex;
+  align-items: center;
+  font-size: 11.5px;
+  line-height: 1;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: var(--bg);
+  white-space: nowrap;
+}
+.tag-chip.experimental { color: #b57bff; border-color: #b57bff55; background: rgba(181, 123, 255, 0.08); }
+.lab-hero-title { margin: 0 0 6px; font-size: 22px; }
+.lab-hero-desc { margin: 0 0 14px; font-size: 13.5px; line-height: 1.8; color: var(--text); opacity: 0.92; max-width: 820px; }
+.lab-hero-desc b, .lab-desc b { color: var(--text); }
+.lab-hero-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 12px; }
+.lab-hero-point {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+}
+.lab-hero-point p { margin: 4px 0 0; color: var(--muted); line-height: 1.7; }
+.ph-ico { font-size: 18px; line-height: 1.3; }
+.lab-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 6px; }
+.lab-head-title { margin: 0 0 6px; font-size: 17px; }
+.lab-head-tags { display: flex; gap: 6px; flex-wrap: wrap; padding-top: 2px; }

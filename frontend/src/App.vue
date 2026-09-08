@@ -1,12 +1,27 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, watch, onMounted } from 'vue'
 import { getDocuments } from './api.js'
 import UploadPanel from './components/UploadPanel.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import ExperimentsPanel from './components/ExperimentsPanel.vue'
 import LogsPanel from './components/LogsPanel.vue'
 
-const activeTab = ref('upload')
+const TAB_KEY = 'reading-assistant-tab'
+let savedTab = null
+try {
+  savedTab = localStorage.getItem(TAB_KEY)
+} catch {
+  savedTab = null
+}
+// 默认进入「聊天问答」主场景；用户切换后记住，刷新不再回到上传页
+const activeTab = ref(['upload', 'chat', 'lab', 'logs'].includes(savedTab) ? savedTab : 'chat')
+watch(activeTab, (value) => {
+  try {
+    localStorage.setItem(TAB_KEY, value)
+  } catch {
+    // 忽略存储不可用
+  }
+})
 const documents = ref([])
 const theme = ref('dark')
 const THEME_KEY = 'reading-assistant-theme'
@@ -66,16 +81,16 @@ onMounted(() => {
     <div class="brand">📚 阅读 Agent</div>
     <nav class="tabs">
       <button class="tab" :class="{ active: activeTab === 'upload' }" @click="activeTab = 'upload'">
-        上传解析
+        <span class="tab-ico">📥</span>上传解析
       </button>
       <button class="tab" :class="{ active: activeTab === 'chat' }" @click="activeTab = 'chat'">
-        聊天问答
+        <span class="tab-ico">💬</span>聊天问答
       </button>
       <button class="tab" :class="{ active: activeTab === 'lab' }" @click="activeTab = 'lab'">
-        实验室
+        <span class="tab-ico">🧪</span>实验室
       </button>
       <button class="tab" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">
-        日志
+        <span class="tab-ico">📄</span>日志
       </button>
     </nav>
     <button
