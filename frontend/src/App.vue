@@ -5,6 +5,7 @@ import UploadPanel from './components/UploadPanel.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import ExperimentsPanel from './components/ExperimentsPanel.vue'
 import LogsPanel from './components/LogsPanel.vue'
+import SettingsPanel from './components/SettingsPanel.vue'
 
 const TAB_KEY = 'reading-assistant-tab'
 let savedTab = null
@@ -14,7 +15,9 @@ try {
   savedTab = null
 }
 // 默认进入「聊天问答」主场景；用户切换后记住，刷新不再回到上传页
-const activeTab = ref(['upload', 'chat', 'lab', 'logs'].includes(savedTab) ? savedTab : 'chat')
+const activeTab = ref(
+    ['upload', 'chat', 'lab', 'logs', 'settings'].includes(savedTab) ? savedTab : 'chat'
+  )
 watch(activeTab, (value) => {
   try {
     localStorage.setItem(TAB_KEY, value)
@@ -92,6 +95,9 @@ onMounted(() => {
       <button class="tab" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">
         <span class="tab-ico">📄</span>日志
       </button>
+      <button class="tab" :class="{ active: activeTab === 'settings' }" @click="activeTab = 'settings'">
+        <span class="tab-ico">⚙️</span>设置
+      </button>
     </nav>
     <button
       class="theme-toggle"
@@ -112,7 +118,8 @@ onMounted(() => {
       />
       <ChatPanel v-else-if="activeTab === 'chat'" :documents="documents" />
       <ExperimentsPanel v-else-if="activeTab === 'lab'" />
-      <LogsPanel v-else />
+      <LogsPanel v-else-if="activeTab === 'logs'" />
+      <SettingsPanel v-else />
     </KeepAlive>
   </main>
 </template>

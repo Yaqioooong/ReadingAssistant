@@ -40,7 +40,7 @@ def create_app(
         logger.info('ReadingAssistant API 启动')
         yield
         logger.info('ReadingAssistant API 关闭')
-    from reading_assistant.api.routes import experiments
+    from reading_assistant.api.routes import experiments, settings
 
     app = FastAPI(title='ReadingAssistant API', version='0.1.0', lifespan=lifespan)
 
@@ -68,6 +68,7 @@ def create_app(
     app.include_router(sessions.router)
     app.include_router(hitl.router)
     app.include_router(experiments.router)
+    app.include_router(settings.router)
 
     dist = Path(get_abs_path('frontend/dist'))
     if dist.is_dir():

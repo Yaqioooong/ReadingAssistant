@@ -1,4 +1,4 @@
-"""问答流水线：检索 → 充足性判断 → 回答 / HITL 澄清 → 记录。"""
+"""问答流水线：多轮上下文 → 检索门 → 检索 → 充足性判断 → 回答 / HITL 澄清 → 记录。"""
 
 import math
 from datetime import datetime, timedelta, timezone
@@ -8,11 +8,13 @@ from langchain_core.embeddings import Embeddings
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from reading_assistant.config import get_settings
 from reading_assistant.model.factory import get_chat_model, get_embedding_model
 from reading_assistant.rag import create_retriever
+from reading_assistant.rag.retriever import _identifier_tokens
 from reading_assistant.storage import (
     ChatMessage,
     create_hitl_task,
@@ -49,6 +51,8 @@ class QAState(TypedDict, total=False):
     cache_hit: bool
     question_hash: str | None
     question_embedding: list[float] | None
+    history: list[dict] | None  # 最近对话轮次(user/assistant 交错、时间正序,不含本轮)
+    intent: str | None  # gate 分类结果: book | history | chat
 
 
 def _chunk_to_dict(chunk) -> dict:
@@ -68,6 +72,7 @@ def _build_answer_prompt(
     chunks: list[dict],
     clarification: str | None = None,
     doc_titles: dict[int, str] | None = None,
+    history: list[dict] | None = None,
 ) -> str:
     labeled: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
@@ -82,6 +87,9 @@ def _build_answer_prompt(
         '你是阅读助手。请仅根据下方"原文片段"回答问题，不要使用外部知识。',
         f'问题：{question}',
     ]
+    if history:
+        header = '【最近对话（仅用于理解指代与追问，回答事实以原文片段为准）】\n'
+        lines.append(header + _render_history(history))
     if clarification:
         lines.append(f'用户补充说明：{clarification}')
     lines.extend(
@@ -103,6 +111,59 @@ def _build_answer_prompt(
             '原文片段前已标注书名《...》，引用时对应到正确的书籍。'
         )
     return '\n\n'.join(lines)
+
+
+
+# ---- 多轮上下文：历史渲染 / 检索门 / 非检索作答 ----
+HISTORY_TURNS = 6  # 读回的最近消息条数（user+assistant 合计）
+_RENDER_MSG_CAP = 240  # 单条历史渲染上限，控制 prompt 长度
+
+
+def _render_history(history: list[dict] | None) -> str:
+    """把最近对话记录渲染成多行文本（时间正序）；供注入 prompt。"""
+    if not history:
+        return ''
+    lines = []
+    for msg in history:
+        role = '用户' if msg.get('role') == 'user' else '助手'
+        content = str(msg.get('content') or '')
+        if len(content) > _RENDER_MSG_CAP:
+            content = content[:_RENDER_MSG_CAP] + '…'
+        lines.append(f'{role}：{content}')
+    return '\n'.join(lines)
+
+
+def _build_gate_prompt(question: str, history: list[dict] | None) -> str:
+    """检索门 prompt：只让模型输出一个意图词，决定本轮是否检索书籍。"""
+    return (
+        '意图分类任务：判断下面这条用户提问是否需要检索书籍内容，只输出一个词：\n'
+        '- history：询问本次会话历史本身（如“我上一个问题是什么”“我前面问过哪些问题”）\n'
+        '- chat：问候/寒暄/感谢等不涉及书籍内容的闲聊\n'
+        '- book：其他一切（询问书籍内容的常规问题）\n\n'
+        '【最近对话】\n'
+        f'{_render_history(history)}\n\n'
+        '【当前提问】\n'
+        f'{question}\n\n'
+        '只输出 book / history / chat 中的一个词：'
+    )
+
+
+def _build_context_prompt(question: str, history: list[dict] | None) -> str:
+    """history/chat 分支作答 prompt：不检索书籍，仅按对话记录作答。"""
+    return (
+        '你是阅读助手。当前用户提问属于对本次对话本身的询问或日常寒暄，'
+        '不需要检索书籍内容。\n'
+        '回答要求：\n'
+        '1. 若能从下方对话记录找到答案（如询问之前问过的问题或说过的话），'
+        '必须按记录原文作答，不得编造记录中不存在的内容。\n'
+        '2. 若对话记录中没有相关内容，如实说明。\n'
+        '3. 若是寒暄（你好/谢谢/你是谁等），礼貌简短回应即可。\n\n'
+        '【对话记录】\n'
+        f'{_render_history(history)}\n\n'
+        '【当前提问】\n'
+        f'{question}\n\n'
+        '可用 final_answer 工具提交最终回答。'
+    )
 
 
 @tool
@@ -221,11 +282,28 @@ def build_qa_graph(
                         _full_question_text(state['question'], state.get('clarification')),
                     )
                     best_entry, best_score = None, 0.0
+                    id_entry, id_score = None, 0.0
                     for cand in list_qa_cache_entries(session, content_hash, doc_id):
                         score = _cosine_similarity(embedding, cand.question_embedding or [])
                         if score > best_score:
                             best_score, best_entry = score, cand
+                        # 标识符变体复用：同一文档内、问题共享产品编号 token（P-002 vs P002）
+                        # 且余弦较高时，视为近似复问——仅复用带答案与引用的强缓存
+                        if (
+                            score >= 0.90
+                            and id_score < score
+                            and cand.answer
+                            and cand.citations
+                            and _identifier_tokens(cand.question_raw or '')
+                            & _identifier_tokens(state['question'])
+                        ):
+                            id_score, id_entry = score, cand
+                    satisfied = False
                     if best_entry is not None and best_score >= settings.cache_similarity_threshold:
+                        satisfied = True
+                    elif id_entry is not None and id_score >= 0.90:
+                        best_entry, best_score, satisfied = id_entry, id_score, True
+                    if satisfied:
                         if _is_cache_expired(best_entry, settings.cache_ttl_days):
                             session.delete(best_entry)
                             return {
@@ -363,6 +441,7 @@ def build_qa_graph(
             chunks=state.get('chunks') or [],
             clarification=state.get('clarification'),
             doc_titles=state.get('doc_titles'),
+            history=state.get('history') or None,
         )
         start = time.perf_counter()
         tool_calls = []
@@ -464,6 +543,83 @@ def build_qa_graph(
     def route_after_answer(state: QAState) -> str:
         return 'create_hitl' if state.get('needs_clarification') else 'record'
 
+
+    def context_load(state: QAState) -> dict:
+        """读回最近对话记录写入 state.history（时间正序，不含本轮；无会话则空）。"""
+        sid = state.get('session_id')
+        if not sid:
+            return {'history': []}
+        with session_scope(session_factory) as session:
+            rows = list(
+                session.scalars(
+                    select(ChatMessage)
+                    .where(ChatMessage.session_id == sid)
+                    .order_by(ChatMessage.id.desc())
+                    .limit(HISTORY_TURNS)
+                )
+            )
+        history = [
+            {'role': msg.role, 'content': msg.content}
+            for msg in reversed(rows)
+        ]
+        return {'history': history}
+
+    def gate(state: QAState) -> dict:
+        """检索门：有历史时才调模型分类本轮意图；首问直接 book 零额外调用。
+
+        history=询问会话历史本身；chat=寒暄闲聊；book=书内容（默认）。
+        解析失败一律回落 book——宁可进检索，也不吞问题。
+        """
+        if not (state.get('history') or []):
+            return {'intent': 'book'}
+        question = state['question']
+        raw = None
+        try:
+            resp = chat_model.invoke(_build_gate_prompt(question, state.get('history')))
+            raw = (getattr(resp, 'content', None) or str(resp)).strip().lower()
+        except Exception:
+            logger.exception('问答[gate] 意图分类异常，回落 book')
+        intent = 'book'
+        if raw:
+            for cand in ('history', 'chat', 'book'):
+                if cand in raw:
+                    intent = cand
+                    break
+        logger.info('问答[gate] q=%.30s intent=%s raw=%s', question, intent, raw)
+        return {'intent': intent}
+
+    def context_answer(state: QAState) -> dict:
+        """history/chat 分支：不检索书籍，仅凭对话记录/寒暄作答；结果写回记录。"""
+        question = state['question']
+        prompt = _build_context_prompt(question, state.get('history') or [])
+        content = ''
+        response = None
+        try:
+            if hasattr(chat_model, 'bind_tools'):
+                response = chat_model.bind_tools([final_answer]).invoke(prompt)
+                tool_calls = getattr(response, 'tool_calls', None) or []
+                if tool_calls:
+                    call = tool_calls[0]
+                    if call.get('name') == 'final_answer':
+                        content = (call.get('args') or {}).get('answer') or ''
+            else:
+                response = chat_model.invoke(prompt)
+        except Exception:
+            logger.exception('问答[context_answer] 模型调用异常')
+        if not content and response is not None:
+            content = getattr(response, 'content', None) or ''
+            if not isinstance(content, str):
+                content = str(content)
+        if not content:
+            content = '抱歉，我暂时没理解你的意思，换个说法试试？'
+        logger.info('问答[context_answer] intent=%s q=%.30s len=%d',
+                    state.get('intent'), question, len(content))
+        return {'answer': content, 'citations': []}
+
+    def route_after_gate(state: QAState) -> str:
+        intent = state.get('intent')
+        return intent if intent in ('book', 'history', 'chat') else 'book'
+
     graph = StateGraph(QAState)
     graph.add_node('cache_check', cache_check)
     graph.add_node('retrieve', retrieve)
@@ -471,7 +627,17 @@ def build_qa_graph(
     graph.add_node('create_hitl', create_hitl)
     graph.add_node('answer', answer)
     graph.add_node('record', record)
-    graph.add_edge(START, 'cache_check')
+    graph.add_node('context_load', context_load)
+    graph.add_node('gate', gate)
+    graph.add_node('context_answer', context_answer)
+    graph.add_edge(START, 'context_load')
+    graph.add_edge('context_load', 'gate')
+    graph.add_conditional_edges(
+        'gate',
+        route_after_gate,
+        {'book': 'cache_check', 'history': 'context_answer', 'chat': 'context_answer'},
+    )
+    graph.add_edge('context_answer', 'record')
     graph.add_conditional_edges(
         'cache_check',
         route_after_cache,

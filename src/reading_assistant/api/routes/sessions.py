@@ -86,6 +86,7 @@ def ask_question(
     import time
 
     _ensure_session(session, session_id)
+
     doc_ids = payload.document_ids or []
     # 单文档走原 document_id 路径（缓存友好）；多文档走 fan-out 并行检索
     document_id = doc_ids[0] if len(doc_ids) == 1 else None

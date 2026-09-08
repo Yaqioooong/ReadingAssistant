@@ -1,6 +1,7 @@
 """检索器：Embedding + 向量库 top-k 检索。"""
 
 import math
+import re
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -58,7 +59,7 @@ class Retriever:
         where = {'document_id': document_id} if document_id is not None else None
         hits = self._vector_store.query(embedding, top_k=k, where=where)
         min_score = settings.retrieval_min_score
-        return [
+        results = [
             RetrievedChunk(
                 chunk_id=hit.id,
                 score=hit.score,
@@ -70,10 +71,55 @@ class Retriever:
             for hit in hits
             if hit.score >= min_score
         ]
+        if not results:
+            # 精确标识符兜底：P002/P-002 这类编号查询在语义通道全灭时，
+            # 用字面等价 token 把所在 chunk 捞回来（编号命中是强信号，不受语义阈值拦截）
+            results = self._identifier_fallback(query, document_id, k, embedding, min_score)
+        return results
 
     def embed(self, query: str) -> list[float]:
         """公开的embedding接口，带L1缓存，供问答图语义缓存使用"""
         return self._embed(query)
+
+    def _identifier_fallback(
+        self,
+        query: str,
+        document_id: int | None,
+        top_k: int,
+        embedding: list[float],
+        min_score: float,
+    ) -> list[RetrievedChunk]:
+        """字面标识符兜底：语义无果时按规范化标识符匹配 chunk 文本。"""
+        wanted = _identifier_tokens(query)
+        if not wanted:
+            return []
+        try:
+            chunks = self._vector_store.all_chunks()
+        except Exception:  # noqa: BLE001 —— 向量库不可用时放弃兜底
+            return []
+        matched: list[RetrievedChunk] = []
+        for chunk in chunks:
+            if document_id is not None and chunk.metadata.get('document_id') != document_id:
+                continue
+            tokens = _chunk_ascii_tokens(chunk.text)
+            if not (tokens & wanted):
+                continue
+            cosine = (
+                _cosine_similarity(embedding, chunk.embedding) if chunk.embedding else 0.0
+            )
+            score = max(cosine, min_score)  # 兜底命中按质量下限进入候选，供 judge 决定
+            matched.append(
+                RetrievedChunk(
+                    chunk_id=chunk.id,
+                    score=score,
+                    text=chunk.text,
+                    document_id=chunk.metadata.get('document_id'),
+                    chapter=chunk.metadata.get('chapter'),
+                    chapter_index=chunk.metadata.get('chapter_index'),
+                )
+            )
+        matched.sort(key=lambda item: item.score, reverse=True)
+        return matched[:top_k]
 
     def _embed(self, query: str) -> list[float]:
         """L1 embedding缓存：归一化query命中则复用向量，跳过付费API
@@ -198,7 +244,39 @@ class HybridRetriever(Retriever):
                     chapter_index=meta.get('chapter_index'),
                 )
             )
+        if not results:
+            results = self._identifier_fallback(
+                query, document_id, k, embedding, min_score
+            )
         return results
+
+
+
+_ASCII_RUN = re.compile(r'[A-Za-z0-9]+(?:[ \t\-_][A-Za-z0-9]+)*')
+
+
+def _canonical_ascii(token: str) -> str:
+    """ASCII 标识符规范化：去分隔符/折叠大小写（P-002/P002/p 002 → p002）。"""
+    return ''.join(ch for ch in (token or '').lower() if ch.isalnum())
+
+
+def _identifier_tokens(text: str) -> set[str]:
+    """提取查询中的“字母+数字混合”标识符 token（产品编号/型号类）。"""
+    found: set[str] = set()
+    for raw in _ASCII_RUN.findall(text or ''):
+        canon = _canonical_ascii(raw)
+        if (
+            len(canon) >= 3
+            and any(ch.isdigit() for ch in canon)
+            and any(ch.isalpha() for ch in canon)
+        ):
+            found.add(canon)
+    return found
+
+
+def _chunk_ascii_tokens(text: str) -> set[str]:
+    """分块文本的规范化 ASCII token 集合（供字面标识符命中判定）。"""
+    return {_canonical_ascii(raw) for raw in _ASCII_RUN.findall(text or '')}
 
 
 def create_retriever(
