@@ -40,6 +40,7 @@ class ChatSession(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     title: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    summary: Mapped[str | None] = mapped_column(Text)  # 长会话滚动摘要 JSON:{upto, text}
 
     messages: Mapped[list['ChatMessage']] = relationship(
         back_populates='session', cascade='all, delete-orphan'

@@ -1,5 +1,6 @@
 """多轮上下文 M1 测试：检索门路由、历史回忆、闲聊直答、书追问注入历史。"""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ from reading_assistant.storage import (
     create_session_factory,
     init_db,
 )
-from reading_assistant.storage.models import Document, QaCacheEntry
+from reading_assistant.storage.models import ChatSession, Document, QaCacheEntry
 from reading_assistant.storage.vector_store import InMemoryVectorStore, StoredChunk
 
 BOOK_REPLY = 'P-002 的上市时间是 2023 年 9 月 22 日。'
@@ -27,6 +28,7 @@ class RouterLLM:
         self.prompts: list[str] = []
         self.gate_calls = 0
         self.context_calls = 0
+        self.summarize_calls = 0
         self.context_reply = '你上一个问题是：「张三喜欢谁？」'
 
     def invoke(self, prompt: str) -> SimpleNamespace:
@@ -34,6 +36,9 @@ class RouterLLM:
         if '意图分类任务' in prompt:
             self.gate_calls += 1
             return SimpleNamespace(content=self._gate_tag(prompt))
+        if '对话摘要任务' in prompt:
+            self.summarize_calls += 1
+            return SimpleNamespace(content='早期对话摘要：较早的几轮书问题。')
         if '不需要检索书籍内容' in prompt:
             self.context_calls += 1
             return SimpleNamespace(content=self.context_reply)
@@ -43,7 +48,8 @@ class RouterLLM:
     def _gate_tag(prompt: str) -> str:
         part = prompt.split('【当前提问】', 1)[-1]
         question = next((ln.strip() for ln in part.splitlines() if ln.strip()), '')
-        if any(t in question for t in ('上一个问题', '前两个问题', '问过哪些', '问了什么')):
+        history_hints = ('上一个问题', '前两个问题', '问过哪些', '问了什么', '第一个问题')
+        if any(t in question for t in history_hints):
             return 'history'
         if any(t in question for t in ('你好', '谢谢')):
             return 'chat'
@@ -58,6 +64,10 @@ class TurnEmb(Embeddings):
             return [0.5, 0.87]
         if '李四喜欢' in text:
             return [0.6, 0.8]
+        if '王五喜欢' in text:
+            return [0.5, 0.87]
+        if '赵六喜欢' in text:
+            return [0.7, 0.71]
         if '张三喜欢' in text:
             return [0.99, 0.1]
         return [0.9, 0.44]
@@ -121,6 +131,7 @@ class TestMultiTurnContext:
             assert '张三喜欢谁？' in meta['answer'], meta
             assert meta['citations'] == []
             assert meta['needs_clarification'] is False
+            assert meta['intent'] == 'history', '历史回忆轮应暴露 history 意图'
             assert llm.gate_calls == 1
 
             msgs = client.get(f'/api/sessions/{sid}/messages').json()
@@ -136,6 +147,7 @@ class TestMultiTurnContext:
             assert _ask(client, sid, '张三喜欢谁？', doc=1)['answer']
             r = _ask(client, sid, '你好')
             assert r['answer'] == '你好呀，想从书里了解点什么？'
+            assert r['intent'] == 'chat'
             assert r['citations'] == []
             assert r['needs_clarification'] is False
             assert llm.context_calls == 1
@@ -167,3 +179,52 @@ class TestMultiTurnContext:
             with factory() as session:
                 rows = list(session.scalars(select(QaCacheEntry)))
             assert len(rows) == 2, '只有书问题产生缓存，history/chat 不得入库'
+
+    def test_repeat_book_question_still_cached(self, tmp_path: Path) -> None:
+        """多轮下同问题重问仍应命中缓存(有历史不破坏单轮缓存语义)。"""
+        llm = RouterLLM()
+        client, factory = _make_env(tmp_path, llm)
+        with client:
+            sid = client.post('/api/sessions').json()['session_id']
+            question = '张三喜欢谁？'
+            first = _ask(client, sid, question, doc=1)
+            assert _ask(client, sid, '你好')['answer']
+            third = _ask(client, sid, question, doc=1)
+            assert third['answer'] == first['answer'], '同问同文档应命中缓存'
+            assert third['intent'] == 'book'
+            with factory() as session:
+                rows = list(session.scalars(select(QaCacheEntry)))
+            assert len(rows) == 1, '重问应命中缓存而不是新增条目'
+
+
+class TestLongSessionSummary:
+    """M3 长会话：超过窗口后滚动增量摘要注入(更早对话摘要段)与落库。"""
+
+    def test_overflow_turns_trigger_incremental_summary(self, tmp_path: Path) -> None:
+        llm = RouterLLM()
+        client, factory = _make_env(tmp_path, llm)
+        with client:
+            sid = client.post('/api/sessions').json()['session_id']
+            turns = [
+                ('张三喜欢谁？', 1),
+                ('李四喜欢谁？', 2),
+                ('王五喜欢谁？', 1),
+                ('赵六喜欢谁？', 2),
+                ('张三喜欢谁？', 1),  # 重复首问 → 命中缓存,但触发摘要
+            ]
+            for q, doc in turns:
+                resp = _ask(client, sid, q, doc=doc)
+                assert resp['answer'], q
+            assert llm.summarize_calls >= 1, '消息超窗口后应触发滚动摘要'
+            assert any('更早对话摘要' in p for p in llm.prompts), 'gate/context prompt 应注入摘要段'
+
+            early = _ask(client, sid, '我第一个问题是什么？')
+            assert early['intent'] == 'history'
+            assert early['answer'] and early['needs_clarification'] is False
+
+            with factory() as session:
+                chat = session.get(ChatSession, int(sid))
+                assert chat is not None and chat.summary, '摘要应落库'
+                data = json.loads(chat.summary)
+                assert isinstance(data, dict) and 'upto' in data and data['text']
+            assert early['answer']  # 历史轮次照常作答

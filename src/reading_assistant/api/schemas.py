@@ -61,6 +61,7 @@ class AskResponse(BaseModel):
     citations: list[CitationOut] = Field(default_factory=list)
     needs_clarification: bool = False
     hitl_task_id: int | None = None
+    intent: str | None = None  # 检索门分类: book | history | chat(供评测/观测)
 
 
 class HitlTaskOut(BaseModel):

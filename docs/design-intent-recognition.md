@@ -68,20 +68,37 @@ build_qa_graph 首节点 context_load:
 
 ## 5. 落地里程碑
 
-> **状态:M1 已完成(2026-09-08)。** 实现见 `src/reading_assistant/graph/qa.py`
-(context_load/gate/context_answer 节点,history 注入 answer prompt),
-测试见 `tests/test_multi_turn.py`(4 例)。M2/M3 待启动。
+> **状态:M1/M2 已完成(2026-09-08)。** M1 实现见 `src/reading_assistant/graph/qa.py`
+> (context_load/gate/context_answer 节点,history 注入 answer prompt),
+> 测试见 `tests/test_multi_turn.py`(6 例);M2/M3 成果见清单 4/5。
 
 
 1. **M1 上下文注入内核**:`history` 进 QAState;context_load 读回最近 N 轮;answer/judge prompt 注入对话记录;检索门直答不检索。跑通「我上一个问题是什么/再上一个呢/刚才说的展开讲讲」。
-2. **M2 缓存与评测**:缓存键上下文化或按评测结果定策略;新增多轮 golden set(`eval/multi_turn_gold.json`),覆盖:历史回忆、指代追问、闲聊、澄清回复、书内容追问;扩展 `run_eval.py` 支持多轮回放。
-3. **M3 长会话**:摘要压缩注入、成本/延迟观测。
+2. **M2 缓存与评测**(✅ 已完成,见清单 4):多轮 golden set + 意图评测脚本;缓存策略经核查决策为维持现状。
+3. **M3 长会话**(✅ 已完成,见清单 5):摘要压缩注入、成本/延迟观测。
+
+4. **M2 成果清单(2026-09-08)**
+   - `AskResponse` 增加 `intent` 观测字段,路由结果可经 API 消费/评测;
+   - `eval/multi_turn_gold.json` 5 场景 12 轮(历史回忆+递归/闲聊/指代书追问/澄清续问/首问元问题)
+     与 `eval/run_intent_eval.py --mode fake|real`(路由准确率+混淆矩阵+内容命中,报告落 `eval/reports/`);
+     fake 与 real(DeepSeek 真机)均 100% 通过(12/12 路由,4/4 内容);
+   - 缓存决策:指纹已含 `clarification` 与 `document_id`(content_hash 域),语义层按澄清后全文取 embedding;
+     history/chat 已绕过缓存;book 轮次保留单轮缓存语义(重复书问题多轮下仍命中),由
+     `test_repeat_book_question_still_cached` 回归锁定,不再扩展指纹。
+
+5. **M3 成果清单(2026-09-09)**
+   - `ChatSession.summary` 列(JSON:`{upto, text}`)+ `init_db` 轻量加列(SQLite/PG 兼容旧库);
+   - `context_load` 窗口溢出后滚动增量摘要:每轮仅把滚出窗口的 `(upto, anchor]` 消息并入既有摘要(约 1-2 条),`summarize` 节点落库,失败沿用旧摘要;
+   - gate/context/answer prompt 统一注入「更早对话摘要」段(注明摘要仅供参考、细节以最近对话原文为准);
+   - 成本/延迟观测:gate/summarize 等 LLM 调用点日志含 `in_chars` 与耗时(ms);
+   - 测试:`test_multi_turn.py` 6 例(新增长会话增量摘要+落库断言);eval 集新增 `mt-06` 长会话早期问题,real 模式 6/6 场景 18/18 轮 100%;
+   - 真机抓到并修复 1 例 gate 误判:承接上文书追问「刚才说的那个计划执行者是谁?」被误分 history——收紧 gate prompt 边界解决(提到“刚才/上一条”≠history,仅查询对话记录本身才算)。
 
 ## 6. 风险与待定
 
 - 检索门判断错误 → 该检索没检索(答案浅)。缓解:gate 保守——拿不准一律检索;gold set 压误判率。
 - 注入历史污染书答案(模型把对话当事实源)。缓解:prompt 分层——书内容只认原文片段;对话记录仅用于指代/回忆。
-- 缓存误命中跨轮歧义。缓解:M2 专项评测。
+- 缓存误命中跨轮歧义:已决策维持现状,并由多轮评测 + 回归测试锁定(M2)。
 - `docs/interview-qa-answers.md` 2026-09-08 条目④已随 qa_meta 删除失效,需改写为本次复盘。
 
 ## 7. 结论

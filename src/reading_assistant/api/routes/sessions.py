@@ -118,4 +118,5 @@ def ask_question(
         citations=result.get('citations') or [],
         needs_clarification=result.get('needs_clarification', False),
         hitl_task_id=result.get('hitl_task_id'),
+        intent=result.get('intent'),
     )

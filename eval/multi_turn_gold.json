@@ -1,0 +1,116 @@
+{
+  "说明": "多轮意图评测集：按会话逐轮回放，校验检索门路由(book/history/chat)与历史回忆内容。in_answer 为历史轮必须出现在回答中的子串。",
+  "cases": [
+    {
+      "id": "mt-01-history-last",
+      "note": "历史回忆：上一问 + 递归再上一问，均走 history 且按记录原文作答",
+      "turns": [
+        {
+          "question": "《三体》中罗辑的咒语指的是什么？",
+          "route": "book"
+        },
+        {
+          "question": "我上一个问题是什么？",
+          "route": "history",
+          "in_answer": "《三体》中罗辑的咒语指的是什么？"
+        },
+        {
+          "question": "再上一个呢？",
+          "route": "history",
+          "in_answer": "我上一个问题是什么？"
+        }
+      ]
+    },
+    {
+      "id": "mt-02-chitchat",
+      "note": "寒暄/闲聊走 chat，不检索书籍",
+      "turns": [
+        {
+          "question": "《三体》中面壁计划是谁提出的？",
+          "route": "book"
+        },
+        {
+          "question": "你好",
+          "route": "chat"
+        },
+        {
+          "question": "谢谢你的回答",
+          "route": "chat"
+        }
+      ]
+    },
+    {
+      "id": "mt-03-referential-followup",
+      "note": "指代追问仍是书问题：必须走 book 检索而非误判为 history/chat",
+      "turns": [
+        {
+          "question": "《三体》中面壁计划是什么？",
+          "route": "book"
+        },
+        {
+          "question": "刚才说的那个计划，执行者是谁？",
+          "route": "book"
+        },
+        {
+          "question": "那第一个计划又是什么？",
+          "route": "book"
+        }
+      ]
+    },
+    {
+      "id": "mt-04-clarify-resume",
+      "note": "澄清补充后重问同一问题：仍是书问题(缓存不得把澄清轮劫持到 HITL)",
+      "turns": [
+        {
+          "question": "张三喜欢谁？",
+          "route": "book"
+        },
+        {
+          "question": "张三喜欢谁？",
+          "route": "book",
+          "clarification": "请以文档一的内容回答"
+        }
+      ]
+    },
+    {
+      "id": "mt-05-first-turn-meta",
+      "note": "首问即元问题(无历史)：按设计回落 book(宁可进检索不漏答),验证 gate 跳过语义",
+      "turns": [
+        {
+          "question": "我上一个问题是什么？",
+          "route": "book"
+        }
+      ]
+    },
+    {
+      "id": "mt-06-long-session-early",
+      "note": "长会话(超窗口):滚动摘要维护期间,早期问题询问仍走 history 且不崩",
+      "turns": [
+        {
+          "question": "《三体》中关于角色罗辑的情节是什么？",
+          "route": "book"
+        },
+        {
+          "question": "《三体》中关于角色章北海的情节是什么？",
+          "route": "book"
+        },
+        {
+          "question": "《三体》中关于角色程心的情节是什么？",
+          "route": "book"
+        },
+        {
+          "question": "《三体》中关于角色云天明的情节是什么？",
+          "route": "book"
+        },
+        {
+          "question": "《三体》中关于角色维德的情节是什么？",
+          "route": "book"
+        },
+        {
+          "question": "我第一个问题是什么？",
+          "route": "history"
+        }
+      ]
+    }
+  ]
+}
