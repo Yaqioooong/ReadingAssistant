@@ -79,7 +79,7 @@ build_qa_graph 首节点 context_load:
 
 4. **M2 成果清单(2026-09-08)**
    - `AskResponse` 增加 `intent` 观测字段,路由结果可经 API 消费/评测;
-   - `eval/multi_turn_gold.json` 5 场景 12 轮(历史回忆+递归/闲聊/指代书追问/澄清续问/首问元问题)
+   - `eval/multi_turn_gold.json` 7 场景 20 轮(历史回忆+递归/闲聊/指代书追问/澄清续问/首问元问题/长会话早期提问/首轮寒暄)
      与 `eval/run_intent_eval.py --mode fake|real`(路由准确率+混淆矩阵+内容命中,报告落 `eval/reports/`);
      fake 与 real(DeepSeek 真机)均 100% 通过(12/12 路由,4/4 内容);
    - 缓存决策:指纹已含 `clarification` 与 `document_id`(content_hash 域),语义层按澄清后全文取 embedding;
@@ -91,8 +91,14 @@ build_qa_graph 首节点 context_load:
    - `context_load` 窗口溢出后滚动增量摘要:每轮仅把滚出窗口的 `(upto, anchor]` 消息并入既有摘要(约 1-2 条),`summarize` 节点落库,失败沿用旧摘要;
    - gate/context/answer prompt 统一注入「更早对话摘要」段(注明摘要仅供参考、细节以最近对话原文为准);
    - 成本/延迟观测:gate/summarize 等 LLM 调用点日志含 `in_chars` 与耗时(ms);
-   - 测试:`test_multi_turn.py` 6 例(新增长会话增量摘要+落库断言);eval 集新增 `mt-06` 长会话早期问题,real 模式 6/6 场景 18/18 轮 100%;
+   - 测试:`test_multi_turn.py` 7 例;eval 集新增 `mt-06` 长会话早期问题与 `mt-07` 首轮寒暄,real 模式 7/7 场景 20/20 轮 100%;
    - 真机抓到并修复 1 例 gate 误判:承接上文书追问「刚才说的那个计划执行者是谁?」被误分 history——收紧 gate prompt 边界解决(提到“刚才/上一条”≠history,仅查询对话记录本身才算)。
+
+6. **修订(2026-09-10):首问也过检索门**
+   - 问题:原设计"首问无历史→跳过 gate 零成本"导致会话第一轮发 `hello` 时掉进书问答链路,检索为空→被判信息不足→误建澄清任务。
+   - 修正:`gate` 仅在**无会话**(如 MCP 工具调用 `session_id=None`)时跳过;凡在会话内(含第一问)一律分类。首轮元问题也由此改为走 history 如实作答("还没有提问记录"),不再建 HITL。
+   - 代价:每个会话首次提问 +1 次轻量分类调用(DeepSeek,数百 ms)。
+   - 回归:`mt-07` 首轮寒暄 + `test_first_turn_greeting_is_chat`;另外「再上一个呢」这类语义歧义问法只校验路由(真模型按语义作答更合理,原先的字面回显断言过苛)。
 
 ## 6. 风险与待定
 

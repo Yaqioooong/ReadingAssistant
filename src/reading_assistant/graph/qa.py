@@ -184,21 +184,23 @@ def _build_gate_prompt(
     summary: str | None = None,
 ) -> str:
     """检索门 prompt：只让模型输出一个意图词，决定本轮是否检索书籍。"""
-    return (
-        '意图分类任务：判断下面这条用户提问是否需要检索书籍内容，只输出一个词：\n'
+    parts = [
+        '意图分类任务：判断下面这条用户提问是否需要检索书籍内容，只输出一个词：',
         '- history：用户在查询“我问过/说过什么”这类会话记录本身'
-        '（如“我上一个问题是什么”“我前面问过哪些问题”），答案就在对话记录里\n'
-        '- chat：问候/寒暄/感谢等不涉及书籍内容的闲聊\n'
+        '（如“我上一个问题是什么”“我前面问过哪些问题”），答案就在对话记录里',
+        '- chat：问候/寒暄/感谢等不涉及书籍内容的闲聊（如“你好”“hello”“谢谢”）',
         '- book：其他一切，包括承接上文继续追问书籍内容'
         '（如“刚才说的那个计划执行者是谁”“上一条回答展开讲讲”）——'
-        '提到“刚才/上一条”并不等于 history，只有查询对话记录本身才算\n\n'
-        '【最近对话】\n'
-        f'{_render_history(history)}\n\n'
-        + (_summary_section(summary) + '\n\n' if summary else '')
-        + '【当前提问】\n'
-        f'{question}\n\n'
-        '只输出 book / history / chat 中的一个词：'
-    )
+        '提到“刚才/上一条”并不等于 history，只有查询对话记录本身才算',
+        '',
+    ]
+    if history:
+        parts.append(f'【最近对话】\n{_render_history(history)}')
+    if summary:
+        parts.append(_summary_section(summary))
+    parts.append(f'【当前提问】\n{question}')
+    parts.append('只输出 book / history / chat 中的一个词：')
+    return '\n'.join(parts)
 
 
 def _build_context_prompt(
@@ -577,8 +579,10 @@ def build_qa_graph(
         if not state.get('session_id'):
             return {}
         with session_scope(session_factory) as session:
+            # 有澄清补充时，记录完整问题（与检索实际使用的文本一致，_full_question_text）
+            user_content = _full_question_text(state['question'], state.get('clarification'))
             session.add(
-                ChatMessage(session_id=state['session_id'], role='user', content=state['question'])
+                ChatMessage(session_id=state['session_id'], role='user', content=user_content)
             )
             if state.get('answer'):
                 session.add(
@@ -684,12 +688,13 @@ def build_qa_graph(
         return {'summary': text}
 
     def gate(state: QAState) -> dict:
-        """检索门：有历史时才调模型分类本轮意图；首问直接 book 零额外调用。
+        """检索门：只要在会话里就分类本轮意图(含第一问)；无会话(如 MCP 工具调用)直接 book。
 
-        history=询问会话历史本身；chat=寒暄闲聊；book=书内容（默认）。
+        history=询问会话历史本身；chat=寒暄闲聊；book=书内容(默认)。
         解析失败一律回落 book——宁可进检索，也不吞问题。
+        注:第一问历史为空,同样要过门——否则首轮"你好"会掉进书问答链路被判信息不足。
         """
-        if not (state.get('history') or []):
+        if not state.get('session_id'):
             return {'intent': 'book'}
         question = state['question']
         raw = None
@@ -786,3 +791,5 @@ def build_qa_graph(
     graph.add_edge('create_hitl', 'record')
     graph.add_edge('record', END)
     return graph.compile(checkpointer=checkpointer or InMemorySaver())
+if __name__ == '__main__':
+    print(build_qa_graph().get_graph().draw_mermaid())

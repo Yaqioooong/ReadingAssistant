@@ -6,6 +6,9 @@ import {
   getHistory,
   sendMessage,
   deleteSession,
+  listHitlTasks,
+  submitClarification,
+  rejectClarification,
   formatTime,
 } from '../api.js'
 
@@ -21,6 +24,10 @@ const selectedDocIds = ref([])  // 空数组 = 全部书籍
 const scopeOpen = ref(false)
 const scopeSearch = ref('')
 const sending = ref(false)
+// 待澄清任务：{ taskId, question } —— 信息不足时记录，用户补充后带澄清内容重发
+const pendingClarification = ref(null)
+const clarificationText = ref('')
+const clarificationBusy = ref(false)
 
 const filteredDocs = computed(() => {
   const query = scopeSearch.value.trim().toLowerCase()
@@ -79,6 +86,8 @@ async function createNewSession() {
     const { session_id } = await createSession()
     currentSessionId.value = session_id
     messages.value = []
+    pendingClarification.value = null
+    clarificationText.value = ''
     await loadSessions()
     scrollToBottom()
   } catch (err) {
@@ -99,18 +108,57 @@ async function removeSession(id) {
   }
 }
 
+function mapHistory(history) {
+  return history.map((m) => ({
+    role: m.role === 'assistant' ? 'assistant' : m.role === 'user' ? 'user' : 'system',
+    content: m.content,
+    citations: m.meta?.citations || [],
+  }))
+}
+
+// 用服务端记录覆盖本地视图，保证「补充后重问」等场景刷新前后展示一致
+async function reloadHistory() {
+  if (!currentSessionId.value) return
+  messages.value = mapHistory(await getHistory(currentSessionId.value))
+  scrollToBottom()
+}
+
 async function selectSession(id) {
   currentSessionId.value = id
   try {
-    const history = await getHistory(id)
-    messages.value = history.map((m) => ({
-      role: m.role === 'assistant' ? 'assistant' : m.role === 'user' ? 'user' : 'system',
-      content: m.content,
-      citations: m.meta?.citations || [],
-    }))
+    await reloadHistory()
+    await restorePendingClarification(id)
     scrollToBottom()
   } catch (err) {
     messages.value = [{ role: 'system', content: `出错：${err.message}` }]
+  }
+}
+
+// 发起一次问答请求（不含用户气泡，由调用方负责）
+async function runQuestion(text, clarification = null) {
+  if (!currentSessionId.value) {
+    const { session_id } = await createSession()
+    currentSessionId.value = session_id
+    await loadSessions()
+  }
+  const payload = { question: text, document_ids: [...selectedDocIds.value] }
+  if (clarification) payload.clarification = clarification
+  const resp = await sendMessage(currentSessionId.value, payload)
+  if (resp.needs_clarification) {
+    // 后端已建澄清任务：交出可交互的补充入口，而不是只丢一句“信息不足”
+    pendingClarification.value = { taskId: resp.hitl_task_id, question: text }
+    clarificationText.value = ''
+    messages.value.push({
+      role: 'system',
+      content: resp.answer || '信息不足，请补充章节、人物或具体情节后继续提问。',
+    })
+  } else {
+    pendingClarification.value = null
+    messages.value.push({
+      role: 'assistant',
+      content: resp.answer || '',
+      citations: resp.citations || [],
+    })
   }
 }
 
@@ -118,37 +166,74 @@ async function send() {
   const text = question.value.trim()
   if (!text || sending.value) return
   sending.value = true
+  question.value = ''
+  messages.value.push({ role: 'user', content: text })
+  scrollToBottom()
   try {
-    if (!currentSessionId.value) {
-      const { session_id } = await createSession()
-      currentSessionId.value = session_id
-      await loadSessions()
-    }
-    messages.value.push({ role: 'user', content: text })
-    question.value = ''
-    scrollToBottom()
-    const documentIds = [...selectedDocIds.value]
-    const resp = await sendMessage(currentSessionId.value, {
-      question: text,
-      document_ids: documentIds,
-    })
-    if (resp.needs_clarification) {
-      messages.value.push({
-        role: 'system',
-        content: resp.answer || '信息不足，请补充章节、人物或具体情节后继续提问。',
-      })
-    } else {
-      messages.value.push({
-        role: 'assistant',
-        content: resp.answer || '',
-        citations: resp.citations || [],
-      })
-    }
+    await runQuestion(text)
   } catch (err) {
     messages.value.push({ role: 'system', content: `出错：${err.message}` })
   } finally {
     sending.value = false
     scrollToBottom()
+  }
+}
+
+// 提交澄清：awaiting -> approved，并带着补充说明重跑原问题
+async function submitClarify() {
+  const pending = pendingClarification.value
+  const extra = clarificationText.value.trim()
+  if (!pending || !extra || clarificationBusy.value) return
+  clarificationBusy.value = true
+  try {
+    if (pending.taskId) await submitClarification(pending.taskId, extra)
+    pendingClarification.value = null
+    clarificationText.value = ''
+    // 与服务端 record 的存储格式保持一致（原问题 + 补充说明）
+    messages.value.push({ role: 'user', content: `${pending.question}\n补充说明：${extra}` })
+    sending.value = true
+    scrollToBottom()
+    await runQuestion(pending.question, extra)
+    await reloadHistory()
+  } catch (err) {
+    messages.value.push({ role: 'system', content: `提交失败：${err.message}` })
+  } finally {
+    sending.value = false
+    clarificationBusy.value = false
+    scrollToBottom()
+  }
+}
+
+// 放弃澄清：awaiting -> rejected
+async function dismissClarify() {
+  const pending = pendingClarification.value
+  if (!pending || clarificationBusy.value) return
+  clarificationBusy.value = true
+  try {
+    if (pending.taskId) await rejectClarification(pending.taskId)
+    messages.value.push({ role: 'system', content: '已放弃本次澄清。' })
+  } catch (err) {
+    messages.value.push({ role: 'system', content: `操作失败：${err.message}` })
+  } finally {
+    pendingClarification.value = null
+    clarificationText.value = ''
+    clarificationBusy.value = false
+  }
+}
+
+// 切换会话/刷新后恢复未处理的澄清任务
+async function restorePendingClarification(sessionId) {
+  pendingClarification.value = null
+  clarificationText.value = ''
+  if (!sessionId) return
+  try {
+    const tasks = await listHitlTasks(sessionId)
+    const awaiting = (tasks || []).filter((t) => t.status === 'awaiting')
+    if (!awaiting.length) return
+    const last = awaiting[awaiting.length - 1]
+    pendingClarification.value = { taskId: last.id, question: last.question }
+  } catch {
+    // 恢复失败不阻塞主流程
   }
 }
 
@@ -279,6 +364,45 @@ onMounted(loadSessions)
                 <span class="dot"></span>
                 <span class="dot"></span>
                 <span class="dot"></span>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="pendingClarification && !sending" class="msg clarify">
+            <div class="msg-inner">
+              <div class="clarify-card">
+                <div class="clarify-head">
+                  <span class="clarify-badge">待补充</span>
+                  <span class="clarify-title">助手需要更多线索才能作答</span>
+                </div>
+                <p class="clarify-desc">
+                  补充章节、人物或情节线索后，会带着你的补充重新检索原文；也可以直接放弃本次提问。
+                </p>
+                <p class="clarify-question">原问题：{{ pendingClarification.question }}</p>
+                <textarea
+                  v-model="clarificationText"
+                  class="clarify-input"
+                  rows="2"
+                  placeholder="例如：第三章里关于张三的段落"
+                  :disabled="clarificationBusy"
+                  @keydown.enter.exact.prevent="submitClarify"
+                ></textarea>
+                <div class="clarify-actions">
+                  <button
+                    class="clarify-submit"
+                    :disabled="!clarificationText.trim() || clarificationBusy"
+                    @click="submitClarify"
+                  >
+                    {{ clarificationBusy ? '提交中…' : '提交补充并重新检索' }}
+                  </button>
+                  <button
+                    class="clarify-dismiss"
+                    :disabled="clarificationBusy"
+                    @click="dismissClarify"
+                  >
+                    放弃
+                  </button>
+                </div>
               </div>
             </div>
           </div>

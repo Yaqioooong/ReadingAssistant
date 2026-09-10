@@ -154,6 +154,8 @@ class TestQaGraph:
             config={'configurable': {'thread_id': 'qa-1'}},
         )
 
+        print(graph.get_graph().draw_mermaid())
+
         assert result['answer'] == '这是基于原文的测试回答。'
         assert result['needs_clarification'] is False
         assert result['citations']

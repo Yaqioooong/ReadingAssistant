@@ -35,14 +35,14 @@ class FakeRouterLLM:
     """fake 模式的意图路由模型：按关键词给 gate 标签；context 轮回显记录中最后一条用户提问。"""
 
     _HISTORY_HINTS = ('上一个', '问过哪些', '前两', '前几', '问了什么', '问过什么', '第一个问题')
-    _CHAT_HINTS = ('你好', '谢谢', '你是谁')
+    _CHAT_HINTS = ('你好', 'hello', 'hi', '谢谢', '你是谁')
 
     def invoke(self, prompt: str) -> SimpleNamespace:
         if '意图分类任务' in prompt:
             question = self._current_question(prompt)
             if any(h in question for h in self._HISTORY_HINTS):
                 return SimpleNamespace(content='history')
-            if any(h in question for h in self._CHAT_HINTS):
+            if any(h.lower() in question.lower() for h in self._CHAT_HINTS):
                 return SimpleNamespace(content='chat')
             return SimpleNamespace(content='book')
         if '不需要检索书籍内容' in prompt:
@@ -119,13 +119,14 @@ def _make_client(mode: str) -> tuple[TestClient, dict[str, int]]:
     return TestClient(app), {}
 
 
-def run(mode: str, limit: int) -> dict:
+def run(mode: str, limit: int, keep_sessions: bool = False) -> dict:
     cases = _load_golden()
     if limit > 0:
         cases = cases[:limit]
     client, doc_map = _make_client(mode)
 
     case_results: list[dict] = []
+    created_sessions: list[str] = []
     route_ok = 0
     content_ok = 0
     content_total = 0
@@ -133,6 +134,7 @@ def run(mode: str, limit: int) -> dict:
     with client:
         for case in cases:
             sid = client.post('/api/sessions').json()['session_id']
+            created_sessions.append(sid)
             turns = case['turns']
             per_turn = []
             case_pass = True
@@ -162,6 +164,18 @@ def run(mode: str, limit: int) -> dict:
                 per_turn.append(record)
             case_results.append({'id': case['id'], 'pass': case_pass, 'turns': per_turn})
 
+        # 清场：评测会话是抛头（会产生 awaiting 澄清任务），默认跑完即删，
+        # 避免污染生产库、也避免任务在前端以「待补充」卡片形式回流。
+        if not keep_sessions:
+            removed = 0
+            for sid in created_sessions:
+                try:
+                    resp = client.delete(f'/api/sessions/{sid}')
+                    removed += int(resp.status_code == 204)
+                except Exception:  # noqa: BLE001 清理失败不影响评测结论
+                    pass
+            print(f'[清理] 已删除评测会话 {removed}/{len(created_sessions)} 个（含其澄清任务）')
+
     total = sum(len(c['turns']) for c in case_results)
     summary = {
         'mode': mode,
@@ -185,9 +199,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description='多轮意图评测')
     parser.add_argument('--mode', choices=('fake', 'real'), default='fake')
     parser.add_argument('--limit', type=int, default=0)
+    parser.add_argument('--keep-sessions', action='store_true',
+                        help='保留评测会话（默认跑完删除，避免污染库）')
     args = parser.parse_args()
 
-    summary, case_results = run(args.mode, args.limit)
+    summary, case_results = run(args.mode, args.limit, args.keep_sessions)
     content_acc = summary['content_accuracy']
     content_txt = '—' if content_acc is None else f'{content_acc:.2%}'
     print(f"[intent-eval {summary['mode']}] cases={summary['case_count']} "

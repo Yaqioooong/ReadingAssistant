@@ -3,7 +3,7 @@
   "cases": [
     {
       "id": "mt-01-history-last",
-      "note": "历史回忆：上一问 + 递归再上一问，均走 history 且按记录原文作答",
+      "note": "历史回忆:上一问按记录原文作答;重复追问可命中\"元问题自身也被记录\"的递归;「再上一个呢」语义有歧义,只校验路由",
       "turns": [
         {
           "question": "《三体》中罗辑的咒语指的是什么？",
@@ -15,9 +15,13 @@
           "in_answer": "《三体》中罗辑的咒语指的是什么？"
         },
         {
-          "question": "再上一个呢？",
+          "question": "我上一个问题是什么？",
           "route": "history",
           "in_answer": "我上一个问题是什么？"
+        },
+        {
+          "question": "再上一个呢？",
+          "route": "history"
         }
       ]
     },
@@ -74,11 +78,11 @@
     },
     {
       "id": "mt-05-first-turn-meta",
-      "note": "首问即元问题(无历史)：按设计回落 book(宁可进检索不漏答),验证 gate 跳过语义",
+      "note": "首问即元问题(无历史):走 history 由 context_answer 如实说明\"还没有提问记录\",不再掉进书链路建澄清任务",
       "turns": [
         {
           "question": "我上一个问题是什么？",
-          "route": "book"
+          "route": "history"
         }
       ]
     },
@@ -109,6 +113,16 @@
         {
           "question": "我第一个问题是什么？",
           "route": "history"
+        }
+      ]
+    },
+    {
+      "id": "mt-07-first-turn-greeting",
+      "note": "回归:会话首问发 hello 必须走 chat 直答,不得被判信息不足",
+      "turns": [
+        {
+          "question": "hello",
+          "route": "chat"
         }
       ]
     }
