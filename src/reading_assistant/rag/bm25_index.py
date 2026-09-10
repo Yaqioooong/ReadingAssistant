@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 
@@ -23,13 +24,29 @@ from reading_assistant.storage.vector_store import StoredChunk, VectorStore
 _CACHE_ATTR = '_bm25_index'
 
 
+_ASCII_RUN = re.compile(r'[A-Za-z0-9]+(?:[ \t\-_][A-Za-z0-9]+)*')
+
+
+def _canonical_ascii(token: str) -> str:
+    """ASCII 标识符规范化：P-002 / P002 / p 002 → p002（与检索层兜底一致）。"""
+    return ''.join(ch for ch in (token or '').lower() if ch.isalnum())
+
+
 def _default_tokenizer() -> callable:
-    """延迟导入 jieba（首用加载词典较慢，避免拖慢进程启动）。"""
+    """延迟导入 jieba（首用加载词典较慢，避免拖慢进程启动）。
+
+    返回 jieba token + ASCII 标识符规范化 token（P-002/P002 词面等价）。
+    """
 
     def tokenize(text: str) -> list[str]:
         import jieba
 
-        return [token for token in jieba.cut(text or '') if token and token.strip()]
+        tokens = [token for token in jieba.cut(text or '') if token and token.strip()]
+        for raw in _ASCII_RUN.findall(text or ''):
+            canon = _canonical_ascii(raw)
+            if len(canon) >= 3 and canon not in tokens:
+                tokens.append(canon)
+        return tokens
 
     return tokenize
 

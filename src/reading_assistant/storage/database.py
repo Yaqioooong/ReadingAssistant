@@ -3,7 +3,8 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, text
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -29,8 +30,25 @@ def create_session_factory(engine: Engine) -> sessionmaker[Session]:
 
 
 def init_db(engine: Engine) -> None:
-    """创建所有表（create_all）。"""
+    """创建所有表（create_all），并对旧库做轻量加列（SQLite/PG 兼容）。"""
     Base.metadata.create_all(bind=engine)
+    _ensure_column(
+        engine,
+        table='chat_sessions',
+        column='summary',
+        ddl='ALTER TABLE chat_sessions ADD COLUMN summary TEXT',
+    )
+
+
+def _ensure_column(engine: Engine, table: str, column: str, ddl: str) -> None:
+    """旧库补列：SQLAlchemy create_all 不修改已存在的表。已存在/表缺失时静默跳过。"""
+    try:
+        if any(c['name'] == column for c in sa_inspect(engine).get_columns(table)):
+            return
+        with engine.begin() as conn:
+            conn.execute(text(ddl))
+    except Exception:  # noqa: BLE001 表不存在或方言不支持时忽略
+        pass
 
 
 @contextmanager

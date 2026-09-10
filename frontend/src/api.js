@@ -30,6 +30,14 @@ function apiDelete(path) {
   return fetch(path, { method: 'DELETE' }).then(parseResponse)
 }
 
+function apiPut(path, payload) {
+  return fetch(path, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(parseResponse)
+}
+
 export const getDocuments = () => apiGet('/api/documents')
 export const uploadBook = (file) => {
   const form = new FormData()
@@ -42,6 +50,10 @@ export const getHistory = (sessionId) => apiGet(`/api/sessions/${sessionId}/mess
 export const sendMessage = (sessionId, payload) =>
   apiPost(`/api/sessions/${sessionId}/messages`, payload)
 export const deleteSession = (sessionId) => apiDelete(`/api/sessions/${sessionId}`)
+
+// ---- 设置 ----
+export const getSettings = () => apiGet('/api/settings')
+export const updateSettings = (updates) => apiPut('/api/settings', { updates })
 
 // ---- 实验室 ----
 export const runEval = (mode, limit = 0, cases = []) =>
