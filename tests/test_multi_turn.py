@@ -51,7 +51,7 @@ class RouterLLM:
         history_hints = ('上一个问题', '前两个问题', '问过哪些', '问了什么', '第一个问题')
         if any(t in question for t in history_hints):
             return 'history'
-        if any(t in question for t in ('你好', '谢谢')):
+        if any(t.lower() in question.lower() for t in ('你好', 'hello', 'hi', '谢谢')):
             return 'chat'
         return 'book'
 
@@ -125,18 +125,34 @@ class TestMultiTurnContext:
             sid = client.post('/api/sessions').json()['session_id']
             first = _ask(client, sid, '张三喜欢谁？', doc=1)
             assert first['answer'] and first['needs_clarification'] is False
-            assert llm.gate_calls == 0, '首问不应触发检索门 LLM 调用'
+            assert llm.gate_calls == 1, '首问也要过检索门(否则 hello 会掉进书链路)'
 
             meta = _ask(client, sid, '我上一个问题是什么？')
             assert '张三喜欢谁？' in meta['answer'], meta
             assert meta['citations'] == []
             assert meta['needs_clarification'] is False
             assert meta['intent'] == 'history', '历史回忆轮应暴露 history 意图'
-            assert llm.gate_calls == 1
+            assert llm.gate_calls == 2
 
             msgs = client.get(f'/api/sessions/{sid}/messages').json()
             user_msgs = [m['content'] for m in msgs if m['role'] == 'user']
             assert user_msgs == ['张三喜欢谁？', '我上一个问题是什么？'], '元问题轮次也应写回记录'
+
+    def test_first_turn_greeting_is_chat(self, tmp_path: Path) -> None:
+        """回归:会话第一问发 hello,应走 chat 直答,不得被判信息不足建 HITL。"""
+        llm = RouterLLM()
+        llm.context_reply = '你好呀，想从书里了解点什么？'
+        client, factory = _make_env(tmp_path, llm)
+        with client:
+            sid = client.post('/api/sessions').json()['session_id']
+            resp = _ask(client, sid, 'hello')
+            assert resp['intent'] == 'chat', resp
+            assert resp['answer'] == '你好呀，想从书里了解点什么？'
+            assert resp['needs_clarification'] is False
+            assert resp.get('hitl_task_id') is None, '寒暄不应创建澄清任务'
+            assert resp['citations'] == []
+            with factory() as session:
+                assert list(session.scalars(select(QaCacheEntry))) == [], '寒暄不入缓存'
 
     def test_chitchat_skips_retrieval(self, tmp_path: Path) -> None:
         llm = RouterLLM()

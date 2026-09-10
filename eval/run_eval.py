@@ -147,6 +147,7 @@ def _run_case(client: TestClient, case: dict, doc_map: dict) -> dict:
         'needs_clarification': needs_clar,
         'latency_ms': round(latency_ms),
         'fail_reason': fail_reason,
+        'session_id': session_id,
     }
 
 
@@ -155,6 +156,7 @@ def run(
     limit: int = 0,
     cases: list[dict] | None = None,
     golden_path: Path | None = None,
+    keep_sessions: bool = False,
 ) -> dict:
     """运行评测（fake=链路冒烟 / real=真实模型），返回报告 dict，供 API 与 CLI 复用。
 
@@ -188,6 +190,16 @@ def run(
                   f"{r['question'][:24]}")
             if not r['pass'] and r['fail_reason']:
                 print(f"          ↳ {r['fail_reason']} | answer: {r['answer']}")
+
+        # 清场：评测会话会产生 awaiting 澄清任务，默认跑完即删，避免污染库
+        if not keep_sessions:
+            removed = 0
+            for sid in {r.get('session_id') for r in results if r.get('session_id')}:
+                try:
+                    removed += int(client.delete(f'/api/sessions/{sid}').status_code == 204)
+                except Exception:  # noqa: BLE001 清理失败不影响评测结论
+                    pass
+            print(f'[清理] 已删除评测会话 {removed} 个（含其澄清任务）')
 
     answerable = [r for r in results if not cases[results.index(r)].get('expect_unanswerable')]
     unans = [r for r in results if cases[results.index(r)].get('expect_unanswerable')]
@@ -231,8 +243,11 @@ def main() -> None:
     parser.add_argument(
         '--golden', type=Path, default=None, help='自定义黄金集路径（默认 golden_set.json）'
     )
+    parser.add_argument('--keep-sessions', action='store_true',
+                        help='保留评测会话（默认跑完删除，避免污染库）')
     args = parser.parse_args()
-    run(mode=args.mode, limit=args.limit, golden_path=args.golden)
+    run(mode=args.mode, limit=args.limit, golden_path=args.golden,
+        keep_sessions=args.keep_sessions)
 
 
 if __name__ == '__main__':

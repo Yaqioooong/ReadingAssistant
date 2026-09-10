@@ -51,6 +51,14 @@ export const sendMessage = (sessionId, payload) =>
   apiPost(`/api/sessions/${sessionId}/messages`, payload)
 export const deleteSession = (sessionId) => apiDelete(`/api/sessions/${sessionId}`)
 
+// ---- HITL 澄清 ----
+export const listHitlTasks = (sessionId) =>
+  apiGet(sessionId ? `/api/hitl/tasks?session_id=${sessionId}` : '/api/hitl/tasks')
+export const submitClarification = (taskId, clarification) =>
+  apiPost(`/api/hitl/tasks/${taskId}/submit`, { clarification })
+export const rejectClarification = (taskId) =>
+  apiPost(`/api/hitl/tasks/${taskId}/reject`)
+
 // ---- 设置 ----
 export const getSettings = () => apiGet('/api/settings')
 export const updateSettings = (updates) => apiPut('/api/settings', { updates })
