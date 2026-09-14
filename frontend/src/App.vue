@@ -4,6 +4,7 @@ import { getDocuments } from './api.js'
 import UploadPanel from './components/UploadPanel.vue'
 import ChatPanel from './components/ChatPanel.vue'
 import ExperimentsPanel from './components/ExperimentsPanel.vue'
+import StatsPanel from './components/StatsPanel.vue'
 import LogsPanel from './components/LogsPanel.vue'
 import SettingsPanel from './components/SettingsPanel.vue'
 
@@ -16,7 +17,7 @@ try {
 }
 // 默认进入「聊天问答」主场景；用户切换后记住，刷新不再回到上传页
 const activeTab = ref(
-    ['upload', 'chat', 'lab', 'logs', 'settings'].includes(savedTab) ? savedTab : 'chat'
+    ['upload', 'chat', 'lab', 'stats', 'logs', 'settings'].includes(savedTab) ? savedTab : 'chat'
   )
 watch(activeTab, (value) => {
   try {
@@ -92,6 +93,9 @@ onMounted(() => {
       <button class="tab" :class="{ active: activeTab === 'lab' }" @click="activeTab = 'lab'">
         <span class="tab-ico">🧪</span>实验室
       </button>
+      <button class="tab" :class="{ active: activeTab === 'stats' }" @click="activeTab = 'stats'">
+        <span class="tab-ico">📊</span>指标
+      </button>
       <button class="tab" :class="{ active: activeTab === 'logs' }" @click="activeTab = 'logs'">
         <span class="tab-ico">📄</span>日志
       </button>
@@ -118,6 +122,7 @@ onMounted(() => {
       />
       <ChatPanel v-else-if="activeTab === 'chat'" :documents="documents" />
       <ExperimentsPanel v-else-if="activeTab === 'lab'" />
+      <StatsPanel v-else-if="activeTab === 'stats'" />
       <LogsPanel v-else-if="activeTab === 'logs'" />
       <SettingsPanel v-else />
     </KeepAlive>

@@ -55,10 +55,12 @@ tests/                    # 90 个自动化测试
 | 表 | 职责 | 关键字段 |
 |---|---|---|
 | `documents` | 文档元数据 | file_hash/content_hash(唯一)、chunk_count、file_path、index_status |
-| `chat_sessions` | 会话 | title（未用）、created_at |
+| `chat_sessions` | 会话 | title（未用）、created_at、summary(JSON，长会话滚动摘要) |
 | `chat_messages` | 消息 | role、content、meta(JSON，存 citations) |
 | `hitl_tasks` | 澄清任务 | status(awaiting/approved/rejected)、clarification |
 | `qa_cache` | 问答缓存 | question_hash(唯一)、question_embedding、answer、citations、content_hash、hit_count、last_hit_at |
+| `qa_request_events` | 缓存埋点（请求级） | cache_hit、cache_channel、cache_similarity、cache_invalidated、latency_ms |
+| `qa_feedback` | 用户反馈 | vote(up/down)、cache_hit —— 误命中率的数据来源 |
 
 `documents.index_status`：`pending → indexing → indexed / failed`——双写一致性状态机（见 §7）。
 
@@ -162,15 +164,56 @@ bind_tools([final_answer, request_clarification]).invoke(prompt)
 ```
 设计意图：判定权交给 LLM 语义理解，让它区分"原文没写（诚实答没有）"与"信息不充分（要澄清）"——关键词方案做不到。澄清后仍判定不足 → 不再重复建任务，把 missing_info 作为说明文本返回。
 
+### 引用列表：与答案 [n] 标记对齐
+召回片段在 prompt 中按顺序编号，模型被要求用 [n] 标注依据。回答文本可能只用到其中少数几条，
+若把召回结果整段回传，用户会看到"只用了一条却列出六条"的噪声。因此 answer 节点做两步处理：
+
+```
+所有召回片段 → 带原始 index
+  ├─ 解析答案里的 [n]（_used_citation_indexes，越界/重复自动忽略）
+  ├─ 有标记 → 只保留被引用的片段
+  │    无标记 → 保留全部（兜底，避免丢失溯源线索）
+  └─ 重排为连续 1..n，并同步改写答案里的 [n]（_renumber_citations）
+       一次正则替换完成，避免 [1]↔[2] 互换时的串联污染
+```
+
+重排的意义：只引用第 3 条时，列表显示 `[3]` 会让人以为丢了前两条；重排后统一从 `[1]` 起连续编号。
+写入缓存前完成（answer 与 citations 一并落库），保证命中缓存时展示一致。
+
+### 缓存可观测性（指标看板）
+三层缓存的命中判定原先只有精确命中打日志，语义层与标识符层**静默返回**，
+"各通道贡献多少"无法回答，缓存阈值（0.95）也缺乏调优依据。现在：
+
+```
+cache_check 每个 return 分支 → state.cache_channel
+   exact | semantic | identifier | miss | disabled | skipped
+   （disabled=多文档或开关关闭；skipped=闲聊/历史类轮次，本就未经缓存检查）
+        ↓
+API 路由层写 qa_request_events（含 latency_ms，路由层才拿得到耗时）
+        ↓
+GET /api/stats/cache → 请求级归因 / 相似度分位 / 脏缓存 / 反馈 / 存量健康度
+POST /api/feedback  → 缓存答案被点踩即计入误命中率
+```
+
+两个关键口径决策：
+- **命中率用「可缓存请求」作分母**（排除 disabled 与 skipped）。闲聊轮次永远不命中，
+  用全量口径会稀释指标、失真；实测同一批流量：全量口径 50% vs 可缓存口径 71.4%。
+- **`near_threshold` 统计「擦肩而过」**（未命中但相似度距阈值 <0.01 的次数），
+  这才是下调阈值能多拿多少命中的直接预估 —— 命中样本的相似度必然 ≥ 阈值，按命中统计恒为空。
+
+看板见前端「📊 指标」tab（StatsPanel.vue）；契约细节见 docs/cache-metrics-contract.md。
+
 ### HITL 与缓存联动
 - `create_hitl` 存 HITL 缓存（answer=None, needs_clarification=True）→ 同问题下次直接命中走 HITL，不再烧 LLM
 - 任务状态机 awaiting → approved/rejected；approved 后带 `clarification` 重问，judge 视为已补充
+- 前端 `/api/hitl/tasks` 打通：信息不足时渲染补充卡片（提交 → approved 后重跑 / 放弃 → rejected），
+  切换会话自动恢复未处理任务；`record` 节点把澄清补充并入用户消息，历史可回放当时实际检索文本
 
 ---
 
 ## 10. API 层（api/）
 
-- 路由：`/api/documents`（list / upload / reindex）、`/api/sessions`（创建/列表/消息/删除）、`/api/hitl`（tasks / submit / reject）
+- 路由：`/api/documents`（list / upload / reindex）、`/api/sessions`（创建/列表/消息/删除）、`/api/hitl/tasks`（list / submit / reject）、`/api/stats/cache`、`/api/feedback`
 - `deps.py` `@lru_cache` 缓存单例；`create_app(...)` 注入参数 → `dependency_overrides`——测试全链路替换 SQLite + Fake 模型 + InMemory 向量库
 - 删会话：先删 HITL 任务（外键无级联）→ 再删会话（messages ORM 级联）
 - 中间件：每请求记录 method / path / status / 耗时
@@ -216,5 +259,14 @@ Supervisor → 检索 Worker → 总结 Worker 三级协作：
 5. **污染缓存回流**：旧代码把"信息不足"回答当正常回答缓存 → 命中时校验 answer 质量，无效即删
 6. **Chroma score 语义相反**：距离 vs 相似度 → `1/(1+d)` 统一
 7. **关键词判定片面**：HITL 充分性从关键词启发式升级为 `@tool` 工具调用（LLM 语义表态）
+8. **语义命中静默**：三层缓存只有精确命中打日志，语义/标识符层直接 return → 命中无法归因。
+   现由 `cache_check` 每个分支写 `state.cache_channel`，路由层落 `qa_request_events`
+9. **命中率被稀释**：闲聊轮次不经缓存却计入分母，命中率失真。实测同批流量 **全量 50% vs 可缓存 71.4%**
+   → 引入 `disabled`/`skipped` 两类"不适用缓存"并改用可缓存口径
+10. **写入后立刻读的竞态**：FastAPI 的 yield 依赖其退出代码在**响应发出之后**才执行，
+    `create_session` 只 flush 未 commit → 前端「新建会话 → 立刻提问」偶发 404（会话不存在）。
+    改为显式 `session.commit()` 消除（连续 6 轮验证 0 失败）
+11. **测试夹具踩到归一化**：`Retriever._embed` 按 `normalize_question` 后的文本做 embedding 并缓存，
+    构造语义命中用例时关键词必须按归一化形态写（小写、无标点），否则静默落到默认向量
 8. **缓存 tuple 污染**：`existing.answer = (answer,)` 元组包裹 → 更新分支写坏数据
 9. **阈值校准依赖实测**：0.45 来自真实分数分布观测，换 embedding 模型需重新校准

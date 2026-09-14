@@ -2,6 +2,7 @@
 
 import json
 import math
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from typing import TypedDict
@@ -57,6 +58,9 @@ class QAState(TypedDict, total=False):
     history: list[dict] | None  # 最近对话轮次(user/assistant 交错、时间正序,不含本轮)
     intent: str | None  # gate 分类结果: book | history | chat
     summary: str | None  # 长会话滚动摘要文本(较早轮次已压缩)
+    cache_channel: str | None  # exact | semantic | identifier | miss | disabled
+    cache_similarity: float | None  # 语义/标识符命中时的相似度
+    cache_invalidated: bool  # 是否丢弃过"信息不足式"脏缓存
     summary_pending: dict | None  # summarize 增量任务: {upto, anchor, text}
 
 
@@ -108,6 +112,7 @@ def _build_answer_prompt(
                 '1. 用简洁自然的中文直接作答，不要复述或粘贴原文片段。\n'
                 '2. 需要引用原文时，在对应句子末尾用 [n] 标注（n 为片段编号），'
                 '例如：朱六希望张三喜欢王五[1]。\n'
+                '   引用要精准：只标注答案实际依据的片段，不要为所有片段都标注。\n'
                 '3. 若原文片段足以回答，请调用 final_answer 工具提交回答；'
                 '若不足以回答，请调用 request_clarification 工具并说明缺少什么。'
             ),
@@ -303,6 +308,57 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+_CITATION_MARK = re.compile(r'\[(\d{1,2})\]')
+
+
+def _used_citation_indexes(content: str | None, total: int) -> list[int]:
+    """从回答文本解析 [n] 标记，返回按出现顺序去重的有效编号（1..total）。
+
+    回答里没标引用时返回空列表，调用方据此决定回退策略。
+    """
+    if not content or total <= 0:
+        return []
+    used: list[int] = []
+    for match in _CITATION_MARK.finditer(content):
+        num = int(match.group(1))
+        if 1 <= num <= total and num not in used:
+            used.append(num)
+    return used
+
+
+
+def _renumber_citations(
+    content: str | None, citations: list[dict]
+) -> tuple[str, list[dict]]:
+    """把引用编号重排为连续的 1..n，并同步改写回答里的 [n] 标记。
+
+    只重写出现在引用列表中的编号，其余标记原样保留；一次正则替换完成，
+    避免 [1]→[2]、[2]→[1] 这类互换时的串联污染。
+    """
+    if not content or not citations:
+        return content, citations
+    mapping: dict[int, int] = {}
+    for new_index, citation in enumerate(citations, start=1):
+        old_index = citation.get('index')
+        if isinstance(old_index, int):
+            mapping[old_index] = new_index
+    if all(old == new for old, new in mapping.items()):
+        return content, citations  # 已是连续编号，无需改动
+
+    new_content = _CITATION_MARK.sub(
+        lambda m: (
+            f'[{mapping[int(m.group(1))]}]'
+            if int(m.group(1)) in mapping
+            else m.group(0)
+        ),
+        content,
+    )
+    new_citations = [
+        {**c, 'index': mapping.get(c.get('index'), c.get('index'))} for c in citations
+    ]
+    return new_content, new_citations
+
+
 def build_qa_graph(
     session_factory: sessionmaker[Session],
     vector_store: VectorStore,
@@ -320,10 +376,10 @@ def build_qa_graph(
     def cache_check(state: QAState) -> dict:
         if len(state.get('document_ids') or []) > 1:
             # 多文档问答缓存键需绑定全部文档版本，MVP 直接跳过缓存（每次实时检索）
-            return {'cache_hit': False, 'question_hash': None}
+            return {'cache_hit': False, 'question_hash': None, 'cache_channel': 'disabled'}
         settings = get_settings()
         if not settings.cache_enabled:
-            return {'cache_hit': False, 'question_hash': None}
+            return {'cache_hit': False, 'question_hash': None, 'cache_channel': 'disabled'}
         question_hash = sha256_hex(
             normalize_question(state['question'])
             + '|'
@@ -359,33 +415,43 @@ def build_qa_graph(
                         ):
                             id_score, id_entry = score, cand
                     satisfied = False
+                    channel = 'semantic'
                     if best_entry is not None and best_score >= settings.cache_similarity_threshold:
                         satisfied = True
                     elif id_entry is not None and id_score >= 0.90:
                         best_entry, best_score, satisfied = id_entry, id_score, True
+                        channel = 'identifier'
                     if satisfied:
                         if _is_cache_expired(best_entry, settings.cache_ttl_days):
                             session.delete(best_entry)
+                            logger.info('问答[缓存] 语义候选已过期丢弃 channel=%s q=%.30s',
+                                        channel, state['question'])
                             return {
                                 'cache_hit': False,
                                 'question_hash': question_hash,
                                 'question_embedding': embedding,
+                                'cache_channel': 'miss',
                             }
                         if best_entry.answer and _looks_like_no_info(best_entry.answer):
                             # 无效缓存：信息不足式回答不应被缓存，删除并重新回答
-                            logger.warning('问答[缓存] 丢弃无效回答缓存 id=%s q=%.30s',
-                                           best_entry.id, state['question'])
+                            logger.warning('问答[缓存] 丢弃无效回答缓存 id=%s channel=%s q=%.30s',
+                                           best_entry.id, channel, state['question'])
                             session.delete(best_entry)
                             return {
                                 'cache_hit': False,
                                 'question_hash': question_hash,
                                 'question_embedding': embedding,
+                                'cache_channel': 'miss',
+                                'cache_similarity': best_score,
+                                'cache_invalidated': True,
                             }
                         touch_qa_cache_hit(session, best_entry)
                         # 必须在commit之前取值（DetachedInstanceError）
                         answer = best_entry.answer
                         citations = list(best_entry.citations or [])
                         needs_clarification = best_entry.needs_clarification
+                        logger.info('问答[缓存] %s命中 score=%.4f q=%.30s',
+                                    channel, best_score, state['question'])
                         return {
                             'cache_hit': True,
                             'question_hash': question_hash,
@@ -393,22 +459,30 @@ def build_qa_graph(
                             'answer': answer,
                             'citations': citations,
                             'needs_clarification': needs_clarification,
+                            'cache_channel': channel,
+                            'cache_similarity': best_score,
                         }
                     return {
                         'cache_hit': False,
                         'question_hash': question_hash,
                         'question_embedding': embedding,
+                        'cache_channel': 'miss',
+                        'cache_similarity': best_score,
                     }
-                return {'cache_hit': False, 'question_hash': question_hash}
+                return {'cache_hit': False, 'question_hash': question_hash,
+                        'cache_channel': 'miss'}
             if _is_cache_expired(entry, settings.cache_ttl_days):
                 session.delete(entry)
-                return {'cache_hit': False, 'question_hash': question_hash}
+                logger.info('问答[缓存] 精确条目已过期丢弃 q=%.30s', state['question'])
+                return {'cache_hit': False, 'question_hash': question_hash,
+                        'cache_channel': 'miss'}
             if entry.answer and _looks_like_no_info(entry.answer):
                 # 无效缓存：信息不足式回答不应被缓存，删除并重新回答
-                logger.warning('问答[缓存] 丢弃无效回答缓存 id=%s q=%.30s',
+                logger.warning('问答[缓存] 丢弃无效回答缓存 id=%s channel=exact q=%.30s',
                                entry.id, state['question'])
                 session.delete(entry)
-                return {'cache_hit': False, 'question_hash': question_hash}
+                return {'cache_hit': False, 'question_hash': question_hash,
+                        'cache_channel': 'miss', 'cache_invalidated': True}
             touch_qa_cache_hit(session, entry)
             answer = entry.answer
             citations = list(entry.citations or [])
@@ -421,6 +495,7 @@ def build_qa_graph(
             'answer': answer,
             'citations': citations,
             'needs_clarification': needs_clarification,
+            'cache_channel': 'exact',
         }
 
     def retrieve(state: QAState) -> dict:
@@ -546,10 +621,12 @@ def build_qa_graph(
                             state['question'])
                 return {'needs_clarification': True, 'answer': None, 'citations': []}
         titles = state.get('doc_titles') or {}
-        citations = []
-        for chunk in state.get('chunks') or []:
-            citations.append(
+        all_citations = []
+        for index, chunk in enumerate(state.get('chunks') or [], start=1):
+            all_citations.append(
                 {
+                    # index 为 prompt 中该片段的编号，用于与答案里的 [n] 标记对应展示
+                    'index': index,
                     'chunk_id': chunk['chunk_id'],
                     'chapter': chunk.get('chapter'),
                     'page': None,
@@ -557,6 +634,16 @@ def build_qa_graph(
                     'document': titles.get(chunk.get('document_id')),
                 }
             )
+        # 只展示答案实际引用过的片段；回答未标注引用时保留全部，避免丢失溯源线索
+        used_indexes = _used_citation_indexes(content, len(all_citations))
+        if used_indexes:
+            used_set = set(used_indexes)
+            citations = [c for c in all_citations if c['index'] in used_set]
+        else:
+            citations = all_citations
+        # 编号重排为连续的 1..n，回答里的 [n] 标记同步改写：
+        # 避免"只引用 1 条却显示 [3]"这类让用户以为丢了引用的显示
+        content, citations = _renumber_citations(content, citations)
         settings = get_settings()
         if settings.cache_enabled and state.get('question_hash') and not state.get('cache_hit'):
             with session_scope(session_factory) as session:
@@ -590,7 +677,11 @@ def build_qa_graph(
                         session_id=state['session_id'],
                         role='assistant',
                         content=state['answer'],
-                        meta={'citations': state.get('citations') or []},
+                        meta={
+                            'citations': state.get('citations') or [],
+                            'cache_hit': bool(state.get('cache_hit')),
+                            'cache_channel': state.get('cache_channel'),
+                        },
                     )
                 )
         return {}

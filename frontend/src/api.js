@@ -63,6 +63,10 @@ export const rejectClarification = (taskId) =>
 export const getSettings = () => apiGet('/api/settings')
 export const updateSettings = (updates) => apiPut('/api/settings', { updates })
 
+// ---- 缓存指标 ----
+export const getCacheStats = (days = 7) => apiGet(`/api/stats/cache?days=${days}`)
+export const submitFeedback = (payload) => apiPost('/api/feedback', payload)
+
 // ---- 实验室 ----
 export const runEval = (mode, limit = 0, cases = []) =>
   apiPost('/api/experiments/eval', { mode, limit, cases })

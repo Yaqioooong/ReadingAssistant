@@ -9,6 +9,7 @@ import {
   listHitlTasks,
   submitClarification,
   rejectClarification,
+  submitFeedback,
   formatTime,
 } from '../api.js'
 
@@ -113,6 +114,11 @@ function mapHistory(history) {
     role: m.role === 'assistant' ? 'assistant' : m.role === 'user' ? 'user' : 'system',
     content: m.content,
     citations: m.meta?.citations || [],
+    // 缓存来源：历史消息由 record 节点写入 meta，实时响应用 resp 字段
+    cacheHit: !!(m.meta?.cache_hit),
+    cacheChannel: m.meta?.cache_channel || null,
+    feedback: null,
+    feedbackBusy: false,
   }))
 }
 
@@ -158,6 +164,10 @@ async function runQuestion(text, clarification = null) {
       role: 'assistant',
       content: resp.answer || '',
       citations: resp.citations || [],
+      cacheHit: !!resp.cache_hit,
+      cacheChannel: resp.cache_channel || null,
+      feedback: null,
+      feedbackBusy: false,
     })
   }
 }
@@ -234,6 +244,35 @@ async function restorePendingClarification(sessionId) {
     pendingClarification.value = { taskId: last.id, question: last.question }
   } catch {
     // 恢复失败不阻塞主流程
+  }
+}
+
+// 记录用户对某条回答的评价；缓存来源由后端响应/消息 meta 透传，用于计算误命中率
+async function submitVote(target, vote) {
+  if (target.feedback || target.feedbackBusy) return
+  target.feedbackBusy = true
+  target.feedbackError = ''
+  try {
+    const index = messages.value.indexOf(target)
+    let question = ''
+    for (let i = index - 1; i >= 0; i -= 1) {
+      if (messages.value[i].role === 'user') {
+        question = messages.value[i].content
+        break
+      }
+    }
+    await submitFeedback({
+      session_id: currentSessionId.value ? Number(currentSessionId.value) : null,
+      question: question || '（未匹配到对应问题）',
+      vote,
+      cache_hit: !!target.cacheHit,
+      cache_channel: target.cacheChannel || null,
+    })
+    target.feedback = vote
+  } catch (err) {
+    target.feedbackError = `提交失败：${err.message}`
+  } finally {
+    target.feedbackBusy = false
   }
 }
 
@@ -331,11 +370,13 @@ onMounted(loadSessions)
           <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
             <div class="msg-inner">
               <div class="msg-body">
-                <span v-if="m.role === 'assistant'" class="meta">AI 助手</span>
+                <span v-if="m.role === 'assistant'" class="meta">
+                  AI 助手<span v-if="m.cacheHit" class="cache-tag" title="该回答直接复用了历史缓存">缓存</span>
+                </span>
                 <span class="content">{{ m.content }}</span>
                 <div v-if="m.citations && m.citations.length" class="citations">
                   <div v-for="(c, j) in m.citations" :key="j" class="citation">
-                    <span class="src">[{{ j + 1 }}] {{ citationSource(c) }}</span>
+                    <span class="src">[{{ c.index || j + 1 }}] {{ citationSource(c) }}</span>
                     <div class="excerpt">
                       <span>
                         {{
@@ -354,6 +395,28 @@ onMounted(loadSessions)
                     </div>
                   </div>
                 </div>
+              </div>
+              <div v-if="m.role === 'assistant' && m.content" class="msg-actions">
+                <button
+                  class="fb-btn"
+                  :class="{ active: m.feedback === 'up' }"
+                  :disabled="!!m.feedback || m.feedbackBusy"
+                  title="回答有帮助"
+                  @click="submitVote(m, 'up')"
+                >
+                  👍
+                </button>
+                <button
+                  class="fb-btn"
+                  :class="{ active: m.feedback === 'down' }"
+                  :disabled="!!m.feedback || m.feedbackBusy"
+                  title="回答有误（缓存答案被点踩会计入误命中率）"
+                  @click="submitVote(m, 'down')"
+                >
+                  👎
+                </button>
+                <span v-if="m.feedbackError" class="fb-hint">{{ m.feedbackError }}</span>
+                <span v-else-if="m.feedback" class="fb-hint">已反馈</span>
               </div>
             </div>
           </div>

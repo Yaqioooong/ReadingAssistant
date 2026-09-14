@@ -33,6 +33,7 @@ class SessionCreated(BaseModel):
 
 
 class CitationOut(BaseModel):
+    index: int | None = None  # prompt 中片段的原始编号，与回答里的 [n] 对应
     chunk_id: str
     chapter: str | None = None
     page: int | None = None
@@ -62,6 +63,25 @@ class AskResponse(BaseModel):
     needs_clarification: bool = False
     hitl_task_id: int | None = None
     intent: str | None = None  # 检索门分类: book | history | chat(供评测/观测)
+    # 缓存来源（供指标看板与前端反馈使用）
+    cache_hit: bool = False
+    cache_channel: str | None = None  # exact | semantic | identifier | miss | disabled
+    cache_similarity: float | None = None
+
+
+class FeedbackCreate(BaseModel):
+    """用户对回答的反馈：误命中率统计的输入。"""
+
+    session_id: int | None = None
+    question: str = Field(min_length=1, max_length=2000)
+    vote: str = Field(pattern='^(up|down)$')
+    cache_hit: bool = False
+    cache_channel: str | None = None
+
+
+class FeedbackOut(BaseModel):
+    id: int
+    vote: str
 
 
 class HitlTaskOut(BaseModel):

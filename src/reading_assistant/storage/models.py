@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -101,3 +101,43 @@ class QaCacheEntry(Base):
     hit_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_hit_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class QaRequestEvent(Base):
+    """问答请求级埋点：记录每轮请求的缓存判定结果，供指标看板统计。
+
+    写在 API 路由层而非 graph 内，因为耗时(latency_ms)在路由层才可得，
+    且 MCP 等非 HTTP 入口无需埋点。
+    """
+
+    __tablename__ = 'qa_request_events'
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    session_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    intent: Mapped[str | None] = mapped_column(String(16))
+    cache_hit: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # exact | semantic | identifier | miss | disabled
+    cache_channel: Mapped[str | None] = mapped_column(String(16), index=True)
+    cache_similarity: Mapped[float | None] = mapped_column(Float)
+    cache_invalidated: Mapped[bool] = mapped_column(Boolean, default=False)
+    latency_ms: Mapped[int | None] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )
+
+
+class QaFeedback(Base):
+    """用户对回答的反馈：误命中率(cache_hit_down / cache_hit_feedback)的数据来源。"""
+
+    __tablename__ = 'qa_feedback'
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    session_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    question: Mapped[str] = mapped_column(Text, nullable=False)
+    vote: Mapped[str] = mapped_column(String(8), nullable=False, index=True)  # up | down
+    cache_hit: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    cache_channel: Mapped[str | None] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, index=True
+    )

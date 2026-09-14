@@ -13,6 +13,8 @@ from reading_assistant.storage.models import (
     Document,
     HitlTask,
     QaCacheEntry,
+    QaFeedback,
+    QaRequestEvent,
 )
 from reading_assistant.storage.repositories import (
     create_hitl_task,
@@ -56,6 +58,8 @@ __all__ = [
     'ChromaVectorStore',
     'Document',
     'QaCacheEntry',
+    'QaFeedback',
+    'QaRequestEvent',
     'DocumentService',
     'HitlTask',
     'InMemoryVectorStore',
