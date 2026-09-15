@@ -101,7 +101,7 @@ npm install
 npm run dev
 ```
 
-打开 http://localhost:5173。前端已把 `/api` 代理到 `http://127.0.0.1:8000`，后端接口见下节。
+打开 `http://localhost:5173` 前端已把 `/api` 代理到 `http://127.0.0.1:8000`，后端接口见下节。
 
 ### 4. 启动后端
 
@@ -117,16 +117,7 @@ docker compose up -d
 uvicorn reading_assistant.api.main:app --reload
 ```
 
-接口文档见 http://127.0.0.1:8000/docs（Swagger UI）。PostgreSQL 建库步骤见 [Quick_Start.md](Quick_Start.md)。
-
-### 5. 使用命令行（可选）
-
-```bash
-python -m reading_assistant.cli ingest data/books/sample_book.txt
-python -m reading_assistant.cli ask "罗辑在本书中的事件时间线是怎样的？"
-```
-
-安装后也可直接使用 `readingassistant ingest ...` / `readingassistant ask ...`。
+接口文档见 `http://127.0.0.1:8000/docs` （Swagger UI）。PostgreSQL 建库步骤见 [Quick_Start.md](Quick_Start.md)。
 
 ## API 接口
 
@@ -166,15 +157,15 @@ python -m reading_assistant.cli ask "罗辑在本书中的事件时间线是怎�
 
 > 说明：`MD5_HEX_STORE`、`ALLOWED_KNOWEDGE_FILE_TYPE`、`SEPARATORS` 等参数以 `config/chroma.yml` 为准，不通过环境变量覆盖。
 
-## 数据存储（规划中）
+## 数据存储
 
-| 存储 | 用途 |
-| --- | --- |
-| `documents` | 已入库的书籍及元数据（含 md5 去重） |
-| `chunks`（向量集合） | 分块内容、向量与元数据（文档 id、章节、页码） |
-| `chat_sessions` | 会话 |
-| `chat_messages` | 聊天记录 |
-| `hitl_tasks` | HITL 澄清任务（awaiting / approved / rejected） |
+| 存储              | 用途                                        |
+|-----------------|-------------------------------------------|
+| `documents`     | 已入库的书籍及元数据（含 md5 去重）                      |
+| `chat_sessions` | 会话                                        |
+| `chat_messages` | 聊天记录                                      |
+| `hitl_tasks`    | HITL 澄清任务（awaiting / approved / rejected） |
+| `qa_cache`      | 问答缓存                                      |
 
 ## 前端界面
 
@@ -183,8 +174,9 @@ python -m reading_assistant.cli ask "罗辑在本书中的事件时间线是怎�
 - **上传解析**：拖拽 / 选择电子书上传，调用 `POST /api/documents/upload`，展示解析分块数与文档列表。
 - **聊天问答**：新建 / 切换会话，调用 `/api/sessions` 系列接口提问并展示回答；信息不足时展示澄清提示，历史消息可回溯。
 
-开发模式：`cd frontend && npm run dev`（http://localhost:5173，热更新）。
-生产模式：`npm run build` 生成 `frontend/dist`，后端检测到后自动托管，直接访问 http://127.0.0.1:8000 即可。
+
+- **开发模式**：`cd frontend && npm run dev`（http://localhost:5173，热更新）。
+- **生产模式**：`npm run build` 生成 `frontend/dist`，后端检测到后自动托管，直接访问 http://127.0.0.1:8000 即可。
 
 ## Roadmap
 

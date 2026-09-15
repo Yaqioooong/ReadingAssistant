@@ -49,7 +49,7 @@ class EpubParser(BookParser):
 
     @staticmethod
     def _first_metadata(book: epub.EpubBook, name: str) -> str | None:
-        values = book.get_metadata('DC', name)
+        values = book.get_metadata('DC', name) # DC：Dublin Core, EPUB规定的命名空间
         return values[0][0] if values else None
 
     @staticmethod
