@@ -30,15 +30,15 @@
 
 ## 技术栈
 
-| 层 | 选型 |
-| --- | --- |
-| 前端 | Vue 3 + Vite（开发端口 5173，`/api` 代理到 8000） |
-| 后端 | FastAPI + uvicorn |
-| 编排 | LangGraph + langgraph-checkpoint-postgres |
-| LLM | DeepSeek `deepseek-v4-flash`（langchain-deepseek） |
+| 层 | 选型                                                       |
+| --- |----------------------------------------------------------|
+| 前端 | Vue 3 + Vite（开发端口 5173，`/api` 代理到 8000）                  |
+| 后端 | FastAPI + uvicorn                                        |
+| 编排 | LangGraph + langgraph-checkpoint-postgres                |
+| LLM | DeepSeek `deepseek-v4-flash`（langchain-deepseek）         |
 | Embedding | 阿里云百炼 DashScope `text-embedding-v4`（langchain-community） |
-| 结构化存储 | PostgreSQL（psycopg / SQLAlchemy） |
-| 向量存储 | ChromaDB（本地持久化）；内存实现用于测试 |
+| 结构化存储 | PostgreSQL（psycopg / SQLAlchemy）                         |
+| 向量存储 | ChromaDB（本地持久化）                                          |
 
 ## 目录结构
 
@@ -69,10 +69,6 @@
 ├── Quick_Start.md    # PostgreSQL 建库步骤
 └── README.md
 ```
-
-> 📚 想了解项目是怎么一步步开发出来的？见 [tutorial/](tutorial/README.md) 分章节开发教程（面向 agent 开发新人）。
-
-> 说明：早期文档与 AGENTS.md 中写的是 `reading_agent`，实际包名为 `reading_assistant`，请以后者为准。
 
 ## 快速开始
 
@@ -105,7 +101,7 @@ npm run dev
 
 ### 4. 启动后端
 
-先启动 PostgreSQL（可选，仅聊天记录/检查点需要）：
+先启动 PostgreSQL（可选，仅聊天记录/检查点需要，也可使用本地部署的pgsql）：
 
 ```bash
 docker compose up -d
@@ -175,8 +171,8 @@ uvicorn reading_assistant.api.main:app --reload
 - **聊天问答**：新建 / 切换会话，调用 `/api/sessions` 系列接口提问并展示回答；信息不足时展示澄清提示，历史消息可回溯。
 
 
-- **开发模式**：`cd frontend && npm run dev`（http://localhost:5173，热更新）。
-- **生产模式**：`npm run build` 生成 `frontend/dist`，后端检测到后自动托管，直接访问 http://127.0.0.1:8000 即可。
+- **开发模式**：`cd frontend && npm run dev`（`http://localhost:5173`，热更新）。
+- **生产模式**：`npm run build` 生成 `frontend/dist`，后端检测到后自动托管，直接访问 `http://127.0.0.1:8000` 即可。
 
 ## Roadmap
 
