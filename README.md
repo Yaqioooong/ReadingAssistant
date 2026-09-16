@@ -183,5 +183,5 @@ uvicorn reading_assistant.api.main:app --reload
 3. ✅ **storage**：SQLAlchemy 模型 + 向量库适配器（ChromaDB / 内存）。
 4. ✅ **graph**：LangGraph 入库与问答流水线，含 HITL 状态。
 5. ✅ **api**：FastAPI 路由，对齐前端已有调用约定；同步实现 CLI。
-6. ✅ **tests**：补齐 pytest 单测与集成测试（74 个用例，覆盖率 94%）。
+6. ✅ **tests**：补齐 pytest 单测与集成测试（168 个用例）。
 7. **远期**：引用解析、时间线结构化抽取、本地 Embedding / LLM、更多格式（.doc / mobi / html）、用户认证与多租户隔离。

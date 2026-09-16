@@ -3,8 +3,8 @@
 设计要点：
 - 工具薄封装，业务逻辑复用入库图/问答图（与 HTTP 路由同一套流水线），
   避免出现“API 一个行为、MCP 另一个行为”的分叉。
-- 依赖通过 api.deps 的惰性 getter 获取，测试可用 monkeypatch 整体替换
-  （内存库 + Fake 模型），与 create_app 的注入哲学一致。
+- 依赖通过 runtime 的惰性 getter 获取（不依赖 HTTP 层，保持适配器对等），
+  测试可用 monkeypatch 整体替换（内存库 + Fake 模型），与 create_app 的注入哲学一致。
 - upload_book 接收的是本机文件路径（MCP 运行在宿主机上）；文件会复制到
   应用 uploads 目录后再走标准入库链路，保证后续 reindex 有持久源文件。
 
@@ -20,15 +20,15 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
-from reading_assistant.api.deps import (
+from reading_assistant.graph import build_ingest_graph, build_qa_graph
+from reading_assistant.parsers import get_parser
+from reading_assistant.runtime import (
     get_embedding_model,
     get_llm,
     get_session_factory,
     get_upload_dir,
     get_vector_store,
 )
-from reading_assistant.graph import build_ingest_graph, build_qa_graph
-from reading_assistant.parsers import get_parser
 from reading_assistant.storage import (
     get_document,
 )
