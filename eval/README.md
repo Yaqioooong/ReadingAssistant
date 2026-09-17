@@ -187,6 +187,42 @@ _THRESHOLD_OVERRIDES = {
 
 ## 五、加题
 
+### ⚠️ 先看这条：语料文件名 = 文档主键
+
+`_upload_books()` 用**语料目录里的真实文件名**（`path.name`）作为 `doc_map` 的键，
+gold 里的 `document` 靠它换成 `document_id`。所以文件名对不上时**不会报错，只会静默失效**：
+
+| 情况 | 后果 |
+| --- | --- |
+| 语料改名，gold 没跟着改 | 该题 `document` 解析不到 → 生成层退化成全库检索、检索层 gold 为空被 `[skip]`（连分母都不算） |
+| gold 写了语料里不存在的名字 | 同上 |
+| 只改 gold 不改语料 | 同上 |
+
+契约：**`eval/uploads/` 里的文件名必须与 gold 的 `document` 字段逐字符一致**，
+`tests/test_eval_golden_files.py::test_epub_fixture_filename_matches_the_referenced_document`
+把两个方向都钉住了（改名会直接 FAIL，而不是安静地少统计几道题）。
+
+当前大语料 fixture 用的是与生产入库完全相同的文件名：
+
+```
+eval/uploads/西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub
+```
+
+它与应用 `uploads/` 下的同名书**字节一致**（sha256 相同），因此 `DocumentService`
+的分层去重会把它映射到同一个 `document_id`（当前为 7），不会重复入库。
+
+### 加题前的自检
+
+命里 `tests/test_eval_golden_files.py` 会在几秒内告诉你题有没有写歪（不连库、不调模型）：
+
+```bash
+uv run pytest tests/test_eval_golden_files.py -q
+```
+
+它检查：id/题干在本文件内唯一、两层共用 id 的题干一致、`document` 在语料里存在、
+可答题必须有 `expect_keywords`（否则判定退化成「回答非空即通过」）、不可答题不得带关键词、
+五类覆盖齐全、跨文档用例的 `documents` 顺序被打乱、`contains`/`chunk_ids` 恰好二选一且限定了文档。
+
 ### 加端到端题（生成层）
 
 编辑 `golden_set.json`：
@@ -318,15 +354,16 @@ uv run python -m eval.sample_review --agreement eval/reports/review_<ts>.csv
 | `tests/test_eval_metrics.py` | 指标单测（含边界与防回归用例） |
 | `tests/test_eval_run_all.py` | 汇总编排单测（runner 返回形态、落盘顺序） |
 | `tests/test_eval_hard_negative.py` | 负样本挖掘辅助函数单测 |
+| `tests/test_eval_golden_files.py` | **黄金集文件自身的结构守卫**（唯一性/文档可解析/判定策略/类别覆盖/文件名契约） |
 
 ### 数据集
 
 | 文件 | 层 | 内容 |
 | --- | --- | --- |
-| `golden_set.json` | 生成 | 端到端黄金集（分类标注） |
-| `golden_multi_doc.json` | 生成 | 跨文档用例 |
-| `retrieval_gold.json` | 检索 | 带 gold chunk_id 的检索集 |
-| `retrieval_adversarial_gold.json` | 检索 | 对抗集（短语定位） |
+| `golden_set.json` | 生成 | 端到端黄金集（分类标注，38 例） |
+| `golden_multi_doc.json` | 生成 | 跨文档用例（8 例） |
+| `retrieval_gold.json` | 检索 | 检索集（34 例；历史 14 例为 chunk_id 弱标注，xjy-r01~r20 为 `contains` 短语定位） |
+| `retrieval_adversarial_gold.json` | 检索 | 对抗集（短语定位，30 例） |
 | `retrieval_hard_neg.json` | 检索 | 硬负样本（挖掘产物） |
 | `multi_turn_gold.json` | 路由 | 多轮对话集 |
 | `human_labels.json` | — | 人工标注（用于 judge 校准，需手工维护） |
@@ -346,3 +383,13 @@ uv run python -m eval.sample_review --agreement eval/reports/review_<ts>.csv
    judge 结果只能当参考，不能当验收依据。
 5. **没有做显著性检验**，回归判断基于固定阈值。
    样本量小时（<30 题）单题翻转就能造成几个百分点的波动，建议先看 per-case 迁移再下结论。
+6. **信息不足题的判定是纯词表匹配**（`run_eval.HONEST_UNANSWERABLE`），
+   **漏词即假阴性**：模型明明诚实拒答，措辞不在表里就被判 FAIL。2026-09-17 实测踩过
+   「没有提到 / 没有交代」缺失导致两道题误判。加题时若发现此类 FAIL，
+   先人工读一遍答案再决定是补词表还是改用例。
+7. **`contains` 短语定位题的 gold 规模取决于短语本身的稀有度**。
+   短语越常见，命中的 chunk 越多，recall 越容易虚高。守则会拦住「未限定文档」的短语题，
+   但拦不住「限定文档内仍然常见」的短语——出题时仍需人工确认命中数在 1~3 之间（见 §五）。
+8. **端到端结果受缓存影响**。`CACHE_ENABLED=true` 时重复跑同一集会命中上一次的回答缓存，
+   得到的是「已被判定过的答案」而非重新生成。要评估生成质量的真实变化，
+   先清 `qa_cache`（或设 `CACHE_ENABLED=false`）再跑。

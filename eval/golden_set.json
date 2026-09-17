@@ -1,11 +1,13 @@
 {
-  "说明": "黄金评测集：每题标注期望回答关键词或不可答期望。document 用文件名匹配（脚本上传后映射为 document_id）。",
+  "说明": "黄金评测集：每题标注期望回答关键词或不可答期望。document 用文件名匹配（脚本上传后映射为 document_id）。2026-09-17 扩充：语料加入《西游记》epub（1332 chunks），本文件新增 23 题（xjy-01~xjy-21、xjy-26~xjy-27，覆盖 正向基础 7 / 陷阱 5 / 多跳推断 5 / 信息不足 4 / 全库检索 2）；另有 4 题跨文档对照组见 golden_multi_doc.json（xjy-22~xjy-25）。",
   "cases": [
     {
       "id": "love-01",
       "question": "张三喜欢谁？",
       "document": "张三爱情故事.txt",
-      "expect_keywords": ["李四"],
+      "expect_keywords": [
+        "李四"
+      ],
       "expect_unanswerable": false,
       "note": "正向基础题"
     },
@@ -13,7 +15,9 @@
       "id": "love-02",
       "question": "王五喜欢谁？",
       "document": "张三爱情故事.txt",
-      "expect_keywords": ["张三"],
+      "expect_keywords": [
+        "张三"
+      ],
       "expect_unanswerable": false,
       "note": "正向基础题"
     },
@@ -21,7 +25,9 @@
       "id": "love-03",
       "question": "朱六想让张三喜欢谁？",
       "document": "张三爱情故事.txt",
-      "expect_keywords": ["王五"],
+      "expect_keywords": [
+        "王五"
+      ],
       "expect_unanswerable": false,
       "note": "正向推断题"
     },
@@ -29,7 +35,9 @@
       "id": "love-04",
       "question": "李四觉得朱六怎么样？",
       "document": "张三爱情故事.txt",
-      "expect_keywords": ["讨厌"],
+      "expect_keywords": [
+        "讨厌"
+      ],
       "expect_unanswerable": false,
       "note": "原文有明确表述"
     },
@@ -37,7 +45,12 @@
       "id": "love-05",
       "question": "王五喜欢李四吗？",
       "document": "张三爱情故事.txt",
-      "expect_keywords": ["不", "没", "否", "不是"],
+      "expect_keywords": [
+        "不",
+        "没",
+        "否",
+        "不是"
+      ],
       "expect_unanswerable": false,
       "note": "陷阱题：李四喜欢王五≠王五喜欢李四，考验引用准确性"
     },
@@ -45,7 +58,12 @@
       "id": "shaobai-01",
       "question": "少白公是什么身份？",
       "document": "名词大动词.txt",
-      "expect_keywords": ["重臣", "国家元首", "第二号人物", "大臣"],
+      "expect_keywords": [
+        "重臣",
+        "国家元首",
+        "第二号人物",
+        "大臣"
+      ],
       "expect_unanswerable": false,
       "note": "身份题，多个关键词命中其一即可"
     },
@@ -53,7 +71,12 @@
       "id": "shaobai-02",
       "question": "舵手为什么要打倒少白公？",
       "document": "名词大动词.txt",
-      "expect_keywords": ["秩序", "务实", "路线", "运动"],
+      "expect_keywords": [
+        "秩序",
+        "务实",
+        "路线",
+        "运动"
+      ],
       "expect_unanswerable": false,
       "note": "原因题"
     },
@@ -61,7 +84,10 @@
       "id": "shaobai-03",
       "question": "少白公在哪一年失去权力？",
       "document": "名词大动词.txt",
-      "expect_keywords": ["1966", "一九六六"],
+      "expect_keywords": [
+        "1966",
+        "一九六六"
+      ],
       "expect_unanswerable": false,
       "note": "年份题"
     },
@@ -69,7 +95,12 @@
       "id": "shaobai-04",
       "question": "少白公的结局是什么？",
       "document": "名词大动词.txt",
-      "expect_keywords": ["离世", "去世", "死", "幽禁"],
+      "expect_keywords": [
+        "离世",
+        "去世",
+        "死",
+        "幽禁"
+      ],
       "expect_unanswerable": false,
       "note": "结局题"
     },
@@ -85,7 +116,10 @@
       "id": "santi-01",
       "question": "罗辑收到的照片背面写了什么？",
       "document": "sample_duplicate.txt",
-      "expect_keywords": ["不要回答", "别回答"],
+      "expect_keywords": [
+        "不要回答",
+        "别回答"
+      ],
       "expect_unanswerable": false,
       "note": "细节题"
     },
@@ -93,7 +127,10 @@
       "id": "santi-02",
       "question": "罗辑在哪里听到对他的任命？",
       "document": "sample_duplicate.txt",
-      "expect_keywords": ["联合国", "大会堂"],
+      "expect_keywords": [
+        "联合国",
+        "大会堂"
+      ],
       "expect_unanswerable": false,
       "note": "地点题"
     },
@@ -101,7 +138,9 @@
       "id": "santi-03",
       "question": "按黑暗森林理论，文明生存的第一需要是什么？",
       "document": "sample_duplicate.txt",
-      "expect_keywords": ["生存"],
+      "expect_keywords": [
+        "生存"
+      ],
       "expect_unanswerable": false,
       "note": "概念题"
     },
@@ -109,7 +148,10 @@
       "id": "santi-04",
       "question": "罗辑在第三章放下了什么？",
       "document": "sample_duplicate.txt",
-      "expect_keywords": ["酒杯", "酒"],
+      "expect_keywords": [
+        "酒杯",
+        "酒"
+      ],
       "expect_unanswerable": false,
       "note": "细节题"
     },
@@ -117,9 +159,243 @@
       "id": "cross-01",
       "question": "谁在说服张三放弃李四？",
       "document": null,
-      "expect_keywords": ["朱六"],
+      "expect_keywords": [
+        "朱六"
+      ],
       "expect_unanswerable": false,
       "note": "全库检索题：不指定文档"
+    },
+    {
+      "id": "xjy-01",
+      "question": "《西游记》里孙悟空漂洋过海、寻仙访道，最终拜了谁为师？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "菩提祖师"
+      ],
+      "expect_unanswerable": false,
+      "note": "正向基础"
+    },
+    {
+      "id": "xjy-02",
+      "question": "沙僧（沙悟净）被贬到流沙河之前，在天庭担任什么职务？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "卷帘大将"
+      ],
+      "expect_unanswerable": false,
+      "note": "正向基础"
+    },
+    {
+      "id": "xjy-03",
+      "question": "猪八戒（猪悟能）错投猪胎、被贬下凡之前，原本是天庭的什么神？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "天蓬元帅"
+      ],
+      "expect_unanswerable": false,
+      "note": "正向基础"
+    },
+    {
+      "id": "xjy-04",
+      "question": "唐僧（玄奘）的生身父亲叫什么名字？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "陈光蕊"
+      ],
+      "expect_unanswerable": false,
+      "note": "正向基础"
+    },
+    {
+      "id": "xjy-05",
+      "question": "给唐僧充当脚力的白龙马，原本是哪个龙王的第几个儿子？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "玉龙三太子",
+        "敖闰"
+      ],
+      "expect_unanswerable": false,
+      "note": "正向基础"
+    },
+    {
+      "id": "xjy-06",
+      "question": "车迟国国王宠信的三个道士国师，分别号称什么大仙？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "虎力",
+        "鹿力",
+        "羊力"
+      ],
+      "expect_unanswerable": false,
+      "note": "正向基础"
+    },
+    {
+      "id": "xjy-07",
+      "question": "取经功成之后，如来佛祖给孙悟空（孙行者）封的佛号是什么？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "斗战胜佛"
+      ],
+      "expect_unanswerable": false,
+      "note": "正向基础"
+    },
+    {
+      "id": "xjy-08",
+      "question": "有人说红孩儿是牛魔王的弟弟，这在《西游记》里对吗？据书中所写，红孩儿与牛魔王其实是什么关系？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "牛魔王的儿子",
+        "父子"
+      ],
+      "expect_unanswerable": false,
+      "note": "陷阱"
+    },
+    {
+      "id": "xjy-09",
+      "question": "有人说碗子山波月洞的黄袍怪本是天上的天蓬元帅下界，对吗？书中黄袍怪的真身其实是什么？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "奎木狼"
+      ],
+      "expect_unanswerable": false,
+      "note": "陷阱"
+    },
+    {
+      "id": "xjy-10",
+      "question": "有人说乌鸡国那个冒充国王的妖怪是太上老君的坐骑，对吗？据书中交代，它其实是谁的坐骑？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "文殊菩萨",
+        "文殊"
+      ],
+      "expect_unanswerable": false,
+      "note": "陷阱"
+    },
+    {
+      "id": "xjy-11",
+      "question": "有人说铁扇公主（罗刹女）是牛魔王的妹妹，对吗？书中他们其实是什么关系？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "牛魔王的妻"
+      ],
+      "expect_unanswerable": false,
+      "note": "陷阱"
+    },
+    {
+      "id": "xjy-12",
+      "question": "在“真假美猴王”一回中，有人说那个假猴王是观音菩萨派来的，对吗？据书中交代，假猴王的本来面目其实是什么？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "六耳猕猴"
+      ],
+      "expect_unanswerable": false,
+      "note": "陷阱"
+    },
+    {
+      "id": "xjy-13",
+      "question": "孙悟空的授业恩师住在哪座山、哪个洞里传授道法？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "灵台方寸山",
+        "斜月三星洞"
+      ],
+      "expect_unanswerable": false,
+      "note": "多跳推断"
+    },
+    {
+      "id": "xjy-14",
+      "question": "平顶山莲花洞的金角大王、银角大王，原本是哪位神仙身边的什么童子？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "看金炉",
+        "看银炉",
+        "太上老君"
+      ],
+      "expect_unanswerable": false,
+      "note": "多跳推断"
+    },
+    {
+      "id": "xjy-15",
+      "question": "黄风岭作怪的黄风怪，最后是被哪位菩萨降服的？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "灵吉菩萨"
+      ],
+      "expect_unanswerable": false,
+      "note": "多跳推断"
+    },
+    {
+      "id": "xjy-16",
+      "question": "通天河里的妖怪“灵感大王”，它的本相是什么动物？它原本又是被谁养大的？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "金鱼",
+        "莲花池"
+      ],
+      "expect_unanswerable": false,
+      "note": "多跳推断"
+    },
+    {
+      "id": "xjy-17",
+      "question": "黑风山的黑熊精最后被观音菩萨带回落伽山，被安排做了什么？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [
+        "守山大神"
+      ],
+      "expect_unanswerable": false,
+      "note": "多跳推断"
+    },
+    {
+      "id": "xjy-18",
+      "question": "灵台方寸山的菩提祖师，他自己的师父是谁？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [],
+      "expect_unanswerable": true,
+      "note": "信息不足"
+    },
+    {
+      "id": "xjy-19",
+      "question": "牛魔王的师父是谁？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [],
+      "expect_unanswerable": true,
+      "note": "信息不足"
+    },
+    {
+      "id": "xjy-20",
+      "question": "铁扇公主（罗刹女）的父亲是谁？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [],
+      "expect_unanswerable": true,
+      "note": "信息不足"
+    },
+    {
+      "id": "xjy-21",
+      "question": "《西游记》里的玉皇大帝，他的师父是谁？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "expect_keywords": [],
+      "expect_unanswerable": true,
+      "note": "信息不足"
+    },
+    {
+      "id": "xjy-26",
+      "question": "被压在五行山下的那只猴子，最后是谁揭去了山顶的封条？",
+      "document": null,
+      "expect_keywords": [
+        "唐僧",
+        "三藏"
+      ],
+      "expect_unanswerable": false,
+      "note": "全库检索（不指定文档，答案在《西游记》）"
+    },
+    {
+      "id": "xjy-27",
+      "question": "书库的故事里，朱六想让张三转而喜欢上谁？",
+      "document": null,
+      "expect_keywords": [
+        "王五"
+      ],
+      "expect_unanswerable": false,
+      "note": "全库检索（不指定文档，答案在小文档里：大书不得淹没小书）"
     }
   ]
 }

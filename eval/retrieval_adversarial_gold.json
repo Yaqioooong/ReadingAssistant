@@ -1,22 +1,215 @@
 {
-  "description": "词面召回鲁棒性评测集（对抗性/压力测试）：精确引语、专名、数字、结构定位题。gold 由 must_contain 短语在原文中的所在 chunk 界定（非引用弱标注，无循环）。语料规模小 + embedding 强时双方皆命中，作为回归护栏：换 embedding/切分/检索链路后任一题掉出 top-5 即报警。",
+  "description": "词面召回鲁棒性评测集（对抗性/压力测试）：精确引语、专名、数字、结构定位题。gold 由 must_contain 短语在原文中的所在 chunk 界定（非引用弱标注，无循环）。2026-09-17 扩充：语料加入《西游记》（1332 chunks，占全库 1520 的 88%），语料不再「小」——旧 17 题在原语料上双方皆命中属天花板效应，扩集后 cross 口径（不过滤 document_id）能真正区分 vector 与 hybrid。换 embedding/切分/检索链路后任一题掉出 top-5 即报警。",
   "cases": [
-    {"id": "adv-zhangsan-1", "category": "专名", "question": "朱六想让张三喜欢谁？", "document": "张三爱情故事.txt", "contains": "朱六是张三的发小"},
-    {"id": "adv-zhangsan-2", "category": "态度", "question": "李四对朱六的态度是？", "document": "张三爱情故事.txt", "contains": "李四觉得朱六很讨厌"},
-    {"id": "adv-mcj-1", "category": "引语", "question": "舵手宣称党内混入了什么当权派？", "document": "名词大动词.txt", "contains": "走资本主义道路的当权派"},
-    {"id": "adv-mcj-2", "category": "引语", "question": "红卫兵斥责少白公是哪些称号？", "document": "名词大动词.txt", "contains": "叛徒"},
-    {"id": "adv-mcj-3", "category": "专名", "question": "舵手在哪里接见红卫兵挥动军帽？", "document": "名词大动词.txt", "contains": "天安门城楼"},
-    {"id": "adv-mcj-4", "category": "时间", "question": "五月中旬从哪里发出了措辞激烈的通知？", "document": "名词大动词.txt", "contains": "五月中旬"},
-    {"id": "adv-mcj-5", "category": "时间", "question": "一九六六年八月少白公在哪里被拉下权力巅峰？", "document": "名词大动词.txt", "contains": "一九六六年八月"},
-    {"id": "adv-mcj-6", "category": "人物", "question": "少白公的妻子遭遇了什么？", "document": "名词大动词.txt", "contains": "少白公的妻子也被牵连"},
-    {"id": "adv-mcj-7", "category": "结构", "question": "少白公的遗体是如何处理的？", "document": "名词大动词.txt", "contains": "遗体被火化"},
-    {"id": "adv-mcj-8", "category": "时间", "question": "一九六九年少白公在哪里悄然离世？", "document": "名词大动词.txt", "contains": "一九六九年"},
-    {"id": "adv-mcj-9", "category": "结构", "question": "少白公直到许多年后才等来什么？", "document": "名词大动词.txt", "contains": "为他平反"},
-    {"id": "adv-santi-1", "category": "引语", "question": "照片背面用钢笔写了哪几个字？", "document": "sample_duplicate.txt", "contains": "不要回答"},
-    {"id": "adv-santi-2", "category": "专名", "question": "信封正面写了一个什么字？", "document": "sample_duplicate.txt", "contains": "启"},
-    {"id": "adv-santi-3", "category": "专名", "question": "罗辑在哪里听秘书长宣读任命？", "document": "sample_duplicate.txt", "contains": "联合国大会堂"},
-    {"id": "adv-santi-4", "category": "引语", "question": "面壁计划被描述成什么样的人类职业？", "document": "sample_duplicate.txt", "contains": "最孤独的职业"},
-    {"id": "adv-santi-5", "category": "结构", "question": "罗辑在第三章放下了什么？", "document": "sample_duplicate.txt", "contains": "酒杯"},
-    {"id": "adv-santi-6", "category": "专名", "question": "什么让一切善意都显得可疑？", "document": "sample_duplicate.txt", "contains": "猜疑链"}
+    {
+      "id": "adv-zhangsan-1",
+      "category": "专名",
+      "question": "朱六想让张三喜欢谁？",
+      "document": "张三爱情故事.txt",
+      "contains": "朱六是张三的发小"
+    },
+    {
+      "id": "adv-zhangsan-2",
+      "category": "态度",
+      "question": "李四对朱六的态度是？",
+      "document": "张三爱情故事.txt",
+      "contains": "李四觉得朱六很讨厌"
+    },
+    {
+      "id": "adv-mcj-1",
+      "category": "引语",
+      "question": "舵手宣称党内混入了什么当权派？",
+      "document": "名词大动词.txt",
+      "contains": "走资本主义道路的当权派"
+    },
+    {
+      "id": "adv-mcj-2",
+      "category": "引语",
+      "question": "红卫兵斥责少白公是哪些称号？",
+      "document": "名词大动词.txt",
+      "contains": "叛徒"
+    },
+    {
+      "id": "adv-mcj-3",
+      "category": "专名",
+      "question": "舵手在哪里接见红卫兵挥动军帽？",
+      "document": "名词大动词.txt",
+      "contains": "天安门城楼"
+    },
+    {
+      "id": "adv-mcj-4",
+      "category": "时间",
+      "question": "五月中旬从哪里发出了措辞激烈的通知？",
+      "document": "名词大动词.txt",
+      "contains": "五月中旬"
+    },
+    {
+      "id": "adv-mcj-5",
+      "category": "时间",
+      "question": "一九六六年八月少白公在哪里被拉下权力巅峰？",
+      "document": "名词大动词.txt",
+      "contains": "一九六六年八月"
+    },
+    {
+      "id": "adv-mcj-6",
+      "category": "人物",
+      "question": "少白公的妻子遭遇了什么？",
+      "document": "名词大动词.txt",
+      "contains": "少白公的妻子也被牵连"
+    },
+    {
+      "id": "adv-mcj-7",
+      "category": "结构",
+      "question": "少白公的遗体是如何处理的？",
+      "document": "名词大动词.txt",
+      "contains": "遗体被火化"
+    },
+    {
+      "id": "adv-mcj-8",
+      "category": "时间",
+      "question": "一九六九年少白公在哪里悄然离世？",
+      "document": "名词大动词.txt",
+      "contains": "一九六九年"
+    },
+    {
+      "id": "adv-mcj-9",
+      "category": "结构",
+      "question": "少白公直到许多年后才等来什么？",
+      "document": "名词大动词.txt",
+      "contains": "为他平反"
+    },
+    {
+      "id": "adv-santi-1",
+      "category": "引语",
+      "question": "照片背面用钢笔写了哪几个字？",
+      "document": "sample_duplicate.txt",
+      "contains": "不要回答"
+    },
+    {
+      "id": "adv-santi-2",
+      "category": "专名",
+      "question": "信封正面写了一个什么字？",
+      "document": "sample_duplicate.txt",
+      "contains": "启"
+    },
+    {
+      "id": "adv-santi-3",
+      "category": "专名",
+      "question": "罗辑在哪里听秘书长宣读任命？",
+      "document": "sample_duplicate.txt",
+      "contains": "联合国大会堂"
+    },
+    {
+      "id": "adv-santi-4",
+      "category": "引语",
+      "question": "面壁计划被描述成什么样的人类职业？",
+      "document": "sample_duplicate.txt",
+      "contains": "最孤独的职业"
+    },
+    {
+      "id": "adv-santi-5",
+      "category": "结构",
+      "question": "罗辑在第三章放下了什么？",
+      "document": "sample_duplicate.txt",
+      "contains": "酒杯"
+    },
+    {
+      "id": "adv-santi-6",
+      "category": "专名",
+      "question": "什么让一切善意都显得可疑？",
+      "document": "sample_duplicate.txt",
+      "contains": "猜疑链"
+    },
+    {
+      "id": "adv-xjy-1",
+      "category": "专名",
+      "question": "金山寺里给江中漂来的弃婴取乳名、又把他抚养长大的长老是谁？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "法明和尚"
+    },
+    {
+      "id": "adv-xjy-2",
+      "category": "引语",
+      "question": "校订者举出哪个字是世德堂本保留的方言，出自唐僧骂孙悟空的那句话？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "把热舌头铎我"
+    },
+    {
+      "id": "adv-xjy-3",
+      "category": "时间",
+      "question": "江流儿长到多大年纪时，长老才取出匣中血书、让他削发修行？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "一十八岁"
+    },
+    {
+      "id": "adv-xjy-4",
+      "category": "结构",
+      "question": "唐僧被七个女妖吊在洞里、山下还有一处天然热水泉的那座山岭叫什么？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "盘丝岭"
+    },
+    {
+      "id": "adv-xjy-5",
+      "category": "人物",
+      "question": "取经功成后，那个贪吃好色的二徒弟被如来封了什么果位？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "净坛使者"
+    },
+    {
+      "id": "adv-xjy-6",
+      "category": "专名",
+      "question": "在殷小姐梦里送子给她、自称奉观音法旨的神仙是谁？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "南极星君"
+    },
+    {
+      "id": "adv-xjy-7",
+      "category": "结构",
+      "question": "龙王用什么宝物保住了陈光蕊的尸身，等他日后还魂？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "口内含一颗定颜珠"
+    },
+    {
+      "id": "adv-xjy-8",
+      "category": "专名",
+      "question": "玄奘后半生在长安译场一共译出多少卷经论？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "一千三百三十五卷"
+    },
+    {
+      "id": "adv-xjy-9",
+      "category": "引语",
+      "question": "水帘洞外石碣上刻着一副什么对联？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "花果山福地"
+    },
+    {
+      "id": "adv-xjy-10",
+      "category": "专名",
+      "question": "如来告诉观音，哪些猴子不在周天十类之种、连他也难以辨识？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "四猴混世"
+    },
+    {
+      "id": "adv-xjy-11",
+      "category": "专名",
+      "question": "玉兔精被一路追到、山中只有三处兔穴的那座山叫什么名字？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "此山唤做毛颖山"
+    },
+    {
+      "id": "adv-xjy-12",
+      "category": "引语",
+      "question": "第一百回结尾那首诗，用什么句子形容师徒五众最终的正果？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "五圣高居不二门"
+    },
+    {
+      "id": "adv-xjy-13",
+      "category": "态度",
+      "question": "殷小姐对杀害丈夫的强贼怀着怎样刻骨的仇恨？",
+      "document": "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+      "contains": "恨不食肉寝皮"
+    }
   ]
 }

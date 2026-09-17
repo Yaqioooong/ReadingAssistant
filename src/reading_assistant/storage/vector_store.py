@@ -136,9 +136,19 @@ class ChromaVectorStore(VectorStore):
         本项目 embedding 已归一化（DashScope），因此：
         - cosine 空间：Chroma 距离 = 1 - cos → ``cos = 1 - dist``
         - l2 空间（默认）：Chroma 返回**平方**欧氏距离 = 2 - 2cos → ``cos = 1 - dist/2``
+
+        ⚠️ 必须显式收敛为内建 ``float``：Chroma 返回的 distance 是 **numpy 标量**，
+        经 ``1 - dist/2`` 与 ``min/max`` 运算后仍是 numpy 标量（float32/float64）。
+        它会一路混进 QA state 的 ``chunks[*]['score']``，而 LangGraph checkpoint
+        用 ormsgpack 序列化 state 时不认 numpy 类型，直接抛
+        ``TypeError: Type is not msgpack serializable: numpy.float64``
+        —— 表现为「同一条问题偶尔 500」。类型收敛放在源头，别指望下游各自防御。
+        注意：n_results 较小时 Chroma 可能返回内建 float，所以此坑是**间歇性**的，
+        单元测试要给 numpy 输入才能稳定复现。
         """
+        distance = float(distance)
         cosine = 1.0 - distance if self._space == 'cosine' else 1.0 - distance / 2.0
-        return max(-1.0, min(1.0, cosine))
+        return float(max(-1.0, min(1.0, cosine)))
 
     def count(self) -> int:
         return self._collection.count()
@@ -180,7 +190,10 @@ class ChromaVectorStore(VectorStore):
         for index, chunk_id in enumerate(ids):
             embedding = None
             if embeddings is not None and index < len(embeddings) and embeddings[index] is not None:
-                embedding = list(embeddings[index])
+                # 收敛为内建 float：Chroma 返回的是 numpy 标量序列，
+                # 一旦泄漏到下游（BM25 现算余弦 → score → QA state）就会让
+                # LangGraph checkpoint 的 ormsgpack 序列化直接抛 TypeError。
+                embedding = [float(value) for value in embeddings[index]]
             chunks.append(
                 StoredChunk(
                     id=str(chunk_id),

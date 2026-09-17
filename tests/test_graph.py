@@ -16,7 +16,9 @@ from reading_assistant.storage import (
     create_db_engine,
     create_hitl_task,
     create_session_factory,
+    get_document,
     init_db,
+    list_indexed_document_ids,
     reject_hitl_task,
     submit_hitl_clarification,
 )
@@ -132,6 +134,63 @@ class TestIngestGraph:
         assert second['duplicate'] is True
         assert second['document_id'] == first['document_id']
         assert store.count() == first['chunk_count']
+
+    def test_duplicate_upload_keeps_document_indexed(
+        self, session_factory, tmp_path: Path
+    ) -> None:
+        """回归：重复上传（dup=True 且未 force）不得把文档打回 indexing。
+
+        ``route_after_add`` 在重复时直接 END，没有任何节点会再把 index_status 写回
+        indexed；而 QA 检索白名单 ``list_indexed_document_ids()`` 只认 indexed。
+        一旦被误置，这本书在问答里就等于不存在：检索 hit=0 → judge 判「信息不足」
+        → 转 HITL，日志里只有一行 HITL，看不到任何异常。
+        eval 每次运行都会重传全部语料，所以这条路径每轮都会被踩到。
+        """
+        store = InMemoryVectorStore()
+        graph = build_ingest_graph(session_factory, store, embedding_model=FakeEmbeddings())
+        book = _write_book(tmp_path)
+        first = graph.invoke(
+            {'book_path': str(book)},
+            config={'configurable': {'thread_id': 'ingest-idx-1'}},
+        )
+        document_id = first['document_id']
+
+        graph.invoke(
+            {'book_path': str(book)},
+            config={'configurable': {'thread_id': 'ingest-idx-2'}},
+        )
+
+        session = session_factory()
+        try:
+            assert get_document(session, document_id).index_status == 'indexed'
+            assert document_id in list_indexed_document_ids(session)
+        finally:
+            session.close()
+
+    def test_force_reindex_overrides_duplicate_lease(
+        self, session_factory, tmp_path: Path
+    ) -> None:
+        """force=True 时即使命中 file_hash 也要重新走 chunk_and_index（保持 indexed）。"""
+        store = InMemoryVectorStore()
+        graph = build_ingest_graph(session_factory, store, embedding_model=FakeEmbeddings())
+        book = _write_book(tmp_path)
+        first = graph.invoke(
+            {'book_path': str(book)},
+            config={'configurable': {'thread_id': 'ingest-force-1'}},
+        )
+
+        graph.invoke(
+            {'book_path': str(book), 'force': True},
+            config={'configurable': {'thread_id': 'ingest-force-2'}},
+        )
+
+        session = session_factory()
+        try:
+            document = get_document(session, first['document_id'])
+            assert document.index_status == 'indexed'
+            assert document.index_started_at is not None
+        finally:
+            session.close()
 
 
 class TestQaGraph:

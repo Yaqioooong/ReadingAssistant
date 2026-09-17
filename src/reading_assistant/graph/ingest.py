@@ -59,9 +59,21 @@ def build_ingest_graph(
             if result.parsed is None and state.get('force'):
                 # reindex：file_hash 命中时 add_book 不重新解析，手动补上章节内容
                 result.parsed = parse_book(state['book_path'])
-            result.document.index_status = 'indexing'
-            # 租约开始时间：崩溃残留的 indexing 记录靠它与启动对账识别
-            result.document.index_started_at = datetime.now(timezone.utc)
+            # ⚠️ 只有真的会走 chunk_and_index 时才占用租约。
+            # route_after_add 对「重复文件且未 force」直接 END，此时若仍无条件把
+            # index_status 置为 indexing，就再没有任何节点会把它写回 indexed：
+            # 文档永久卡在 indexing，而检索白名单 list_indexed_document_ids()
+            # 只认 indexed —— 整本书的问答拿到 hit=0，被 judge 判成「信息不足」转 HITL，
+            # 表现为「文件明明在库里，却一问三不知」，且日志里只有一行 HITL，无任何报错。
+            # eval 每次运行都会重传全部语料，所以这条路径每个文档每轮都会被踩一次。
+            if not result.duplicate or state.get('force'):
+                result.document.index_status = 'indexing'
+                # 租约开始时间：崩溃残留的 indexing 记录靠它与启动对账识别。
+                # ⚠️ 必须写「naive UTC」：index_started_at 是 timestamp WITHOUT time zone，
+                # 写入 aware datetime 时 psycopg 会按会话时区（Asia/Shanghai）换算后再落库，
+                # 而 reconcile._as_utc() 在不带 tzinfo 时直接按 UTC 解读 —— 于是租约被看成
+                # 8 小时之后才生效，卡死的 indexing 记录永远不会被对账回收。
+                result.document.index_started_at = datetime.now(timezone.utc).replace(tzinfo=None)
             logger.info('入库[add_book] doc=%s file=%s dup=%s force=%s',
                         result.document.id, state['book_path'], result.duplicate,
                         bool(state.get('force')))

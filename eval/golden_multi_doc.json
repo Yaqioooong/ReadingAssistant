@@ -1,29 +1,99 @@
 {
-  "description": "多文档对比问答黄金用例：验证 fan-out 合流不淹没正确文档（documents 顺序故意打乱）",
+  "description": "多文档对比问答黄金用例：验证 fan-out 合流不淹没正确文档（documents 顺序故意打乱） 2026-09-17 扩充：加入与《西游记》（1332 chunks）配对的用例，验证小文档不被大书淹没、以及大书答案不被小文档干扰。",
   "cases": [
     {
       "id": "love-multi-doc",
       "question": "张三喜欢谁？",
-      "documents": ["张三爱情故事.txt", "名词大动词.txt"],
-      "expect_keywords": ["李四"]
+      "documents": [
+        "张三爱情故事.txt",
+        "名词大动词.txt"
+      ],
+      "expect_keywords": [
+        "李四"
+      ]
     },
     {
       "id": "shaobai-multi-doc",
       "question": "少白公在哪一年失去权力？",
-      "documents": ["名词大动词.txt", "张三爱情故事.txt"],
-      "expect_keywords": ["1966", "一九六六"]
+      "documents": [
+        "名词大动词.txt",
+        "张三爱情故事.txt"
+      ],
+      "expect_keywords": [
+        "1966",
+        "一九六六"
+      ]
     },
     {
       "id": "love-multi-reversed",
       "question": "朱六想说服张三喜欢谁？",
-      "documents": ["名词大动词.txt", "张三爱情故事.txt"],
-      "expect_keywords": ["王五"]
+      "documents": [
+        "名词大动词.txt",
+        "张三爱情故事.txt"
+      ],
+      "expect_keywords": [
+        "王五"
+      ]
     },
     {
       "id": "santi-multi-doc",
       "question": "罗辑在哪里听到对他的任命？",
-      "documents": ["sample_duplicate.txt", "名词大动词.txt"],
-      "expect_keywords": ["联合国", "大会堂"]
+      "documents": [
+        "sample_duplicate.txt",
+        "名词大动词.txt"
+      ],
+      "expect_keywords": [
+        "联合国",
+        "大会堂"
+      ]
+    },
+    {
+      "id": "xjy-22",
+      "question": "朱六与张三是什么关系？",
+      "documents": [
+        "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub",
+        "张三爱情故事.txt"
+      ],
+      "expect_keywords": [
+        "发小"
+      ],
+      "note": "跨文档"
+    },
+    {
+      "id": "xjy-23",
+      "question": "少白公是在哪一年去世（离世）的？",
+      "documents": [
+        "名词大动词.txt",
+        "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub"
+      ],
+      "expect_keywords": [
+        "一九六九"
+      ],
+      "note": "跨文档"
+    },
+    {
+      "id": "xjy-24",
+      "question": "《西游记》里，沙僧（沙悟净）随身所持的兵器叫什么名字？",
+      "documents": [
+        "张三爱情故事.txt",
+        "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub"
+      ],
+      "expect_keywords": [
+        "降妖宝杖"
+      ],
+      "note": "跨文档"
+    },
+    {
+      "id": "xjy-25",
+      "question": "《西游记》里，猪八戒那把九齿钉钯的本名（全称）叫什么？",
+      "documents": [
+        "名词大动词.txt",
+        "西游记 (吴承恩) (z-library.sk, 1lib.sk, z-lib.sk).epub"
+      ],
+      "expect_keywords": [
+        "上宝逊金钯"
+      ],
+      "note": "跨文档"
     }
   ]
 }

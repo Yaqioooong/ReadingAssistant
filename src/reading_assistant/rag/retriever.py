@@ -150,13 +150,18 @@ class Retriever:
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """余弦相似度；任一向量缺失/零向量时返回 0。"""
+    """余弦相似度；任一向量缺失/零向量时返回 0。
+
+    ⚠️ 返回值必须显式收敛为内建 ``float``：入参可能来自 Chroma（numpy 标量序列），
+    ``sum(x * y ...)`` 会把 numpy 类型透传出去，进而让 QA state 无法被
+    LangGraph checkpoint 用 msgpack 序列化（TypeError → 接口 500）。
+    """
     if not a or not b or len(a) != len(b):
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = math.sqrt(sum(x * x for x in a))
     norm_b = math.sqrt(sum(y * y for y in b))
-    return dot / (norm_a * norm_b) if norm_a and norm_b else 0.0
+    return float(dot / (norm_a * norm_b)) if norm_a and norm_b else 0.0
 
 
 def fuse_rrf(rankings: list[list[str]], k: int = 60) -> list[str]:

@@ -1,5 +1,6 @@
 """P3 RAG 层测试：文本分块与向量检索。"""
 
+import pytest
 from langchain_core.embeddings import Embeddings
 
 from reading_assistant.config import get_settings
@@ -147,3 +148,25 @@ class TestRetriever:
         hits = retriever.retrieve('张三')
 
         assert [hit.chunk_id for hit in hits] == ['c1']
+
+
+class TestCosineSimilarityTypeContract:
+    """_cosine_similarity 的返回类型契约（numpy 入参不得透传）。"""
+
+    def test_numpy_input_still_returns_builtin_float(self) -> None:
+        import numpy as np
+
+        from reading_assistant.rag.retriever import _cosine_similarity
+
+        score = _cosine_similarity(
+            [np.float64(1.0), np.float64(0.0)],
+            [np.float64(1.0), np.float64(0.0)],
+        )
+        assert type(score) is float
+        assert score == 1.0
+
+    def test_identical_direction_gives_one(self) -> None:
+        from reading_assistant.rag.retriever import _cosine_similarity
+
+        # 浮点累加会有末位误差，比较必须带容差
+        assert _cosine_similarity([1.0, 2.0], [1.0, 2.0]) == pytest.approx(1.0)

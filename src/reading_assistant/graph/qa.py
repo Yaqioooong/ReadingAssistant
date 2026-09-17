@@ -298,7 +298,11 @@ def _full_question_text(question: str, clarification: str | None) -> str:
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
-    """余弦相似度；向量缺失/长度不一致/零向量时返回 0"""
+    """余弦相似度；向量缺失/长度不一致/零向量时返回 0。
+
+    返回值收敛为内建 ``float``，理由同 retriever._cosine_similarity：
+    该值会写进 QA state 的 ``cache_similarity``，numpy 标量会让 checkpoint 序列化失败。
+    """
     if not a or not b or len(a) != len(b):
         return 0.0
     dot = sum(x * y for x, y in zip(a, b))
@@ -306,7 +310,7 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     norm_b = math.sqrt(sum(y * y for y in b))
     if norm_a == 0 or norm_b == 0:
         return 0.0
-    return dot / (norm_a * norm_b)
+    return float(dot / (norm_a * norm_b))
 
 
 _CITATION_MARK = re.compile(r'\[(\d{1,2})\]')
