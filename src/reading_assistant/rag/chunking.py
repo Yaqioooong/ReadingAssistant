@@ -62,6 +62,16 @@ def _split_table_blocks(content: str) -> list[tuple[str, str]]:
     return segments
 
 
+def make_chunk_id(document_id: int, content_hash: str, index: int) -> str:
+    """内容寻址 + 版本化 chunk id：``doc{document_id}-{content_hash[:8]}-{index}``。
+
+    ``content_hash`` 为文档版本指纹（``documents.content_hash``）。相对旧的
+    位置型 id（``doc{document_id}-{index}``），版本段让「同书不同版本」落在
+    不同 id 命名空间，从而可安全地「先写新版本、再删旧版本」。
+    """
+    return f'doc{document_id}-{(content_hash or "")[:8]}-{index}'
+
+
 def chunk_book(
     book: ParsedBook,
     chunk_size: int | None = None,

@@ -83,8 +83,14 @@ def _make_env(tmp_path: Path, llm: RouterLLM) -> tuple[TestClient, object]:
     with factory() as session:
         session.add_all(
             [
-                Document(filename='d1.docx', title='d1', file_hash='f1', content_hash='c1'),
-                Document(filename='d2.docx', title='d2', file_hash='f2', content_hash='c2'),
+                Document(
+                    filename='d1.docx', title='d1', file_hash='f1',
+                    content_hash='c1', index_status='indexed',
+                ),
+                Document(
+                    filename='d2.docx', title='d2', file_hash='f2',
+                    content_hash='c2', index_status='indexed',
+                ),
             ]
         )
         session.commit()

@@ -112,6 +112,7 @@ class TestCacheIdentifierReuse:
                     title='测试表格',
                     file_hash='h-t1',
                     content_hash='c-t1',
+                    index_status='indexed',
                 )
             )
             session.commit()

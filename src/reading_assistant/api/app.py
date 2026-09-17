@@ -21,6 +21,31 @@ from reading_assistant.utils.path_tools import get_abs_path
 logger = get_logger('api')
 
 
+def _reconcile_index_status_on_startup() -> None:
+    """启动对账：把崩溃残留的 ``indexing`` 记录拉回 indexed / failed。
+
+    仅在生产启动路径调用（不在测试注入依赖时）。任一步失败都不阻断启动，
+    只记录日志——对账是「尽力修复」，不能成为新的启动单点。
+    """
+    from reading_assistant.runtime import get_session_factory, get_vector_store
+    from reading_assistant.storage.reconcile import (
+        DEFAULT_LEASE_TIMEOUT_SECONDS,
+        reconcile_index_status,
+    )
+
+    try:
+        actions = reconcile_index_status(
+            get_session_factory(),
+            get_vector_store(),
+            lease_timeout_seconds=DEFAULT_LEASE_TIMEOUT_SECONDS,
+            apply=True,
+        )
+        if actions:
+            logger.warning('启动对账[索引状态] 修正 %d 条卡死记录', len(actions))
+    except Exception:  # noqa: BLE001 对账失败不得阻断启动
+        logger.exception('启动对账[索引状态] 执行失败，已跳过')
+
+
 def create_app(
     session_factory=None,
     vector_store=None,
@@ -37,6 +62,7 @@ def create_app(
         # 测试注入 sqlite 工厂时不碰生产库
         if session_factory is None:
             init_db(create_db_engine())
+            _reconcile_index_status_on_startup()
         logger.info('ReadingAssistant API 启动')
         yield
         logger.info('ReadingAssistant API 关闭')

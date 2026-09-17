@@ -11,6 +11,7 @@ from reading_assistant.graph import build_ingest_graph, build_qa_graph
 from reading_assistant.storage import (
     ChatMessage,
     ChatSession,
+    Document,
     HitlTask,
     create_db_engine,
     create_hitl_task,
@@ -142,6 +143,18 @@ class TestQaGraph:
 
     def test_answers_with_citations_and_records_messages(self, session_factory, session) -> None:
         session_id = self._make_session(session)
+        # 检索层只放行 index_status=='indexed' 的文档，故语料对应文档须先标记为已索引
+        with session_factory() as seed:
+            seed.add(
+                Document(
+                    filename='book.txt',
+                    title='book',
+                    file_hash='f1',
+                    content_hash='c1',
+                    index_status='indexed',
+                )
+            )
+            seed.commit()
         graph = build_qa_graph(
             session_factory,
             _populated_store(),

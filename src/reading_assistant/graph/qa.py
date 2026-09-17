@@ -25,6 +25,7 @@ from reading_assistant.storage import (
     get_document,
     get_qa_cache_entry,
     list_documents,
+    list_indexed_document_ids,
     list_qa_cache_entries,
     normalize_question,
     prune_qa_cache,
@@ -503,6 +504,12 @@ def build_qa_graph(
         if state.get('clarification'):
             question = f'{question}\n补充说明：{state["clarification"]}'
         doc_ids = state.get('document_ids') or []
+        # 检索白名单：每请求查一次 PG，只保留 index_status == 'indexed' 的文档命中，
+        # 避免「入库中断/失败的文档」用其残缺向量冒充来源。
+        # ⚠️ 依赖顺序：启用前必须先跑 scripts/reconcile_index_status.py 清洗历史假阳性
+        #    （历史库里 3/6 文档卡在 indexing，实际向量完整），否则会误杀这些正常文档。
+        with session_scope(session_factory) as session:
+            indexed_ids = list_indexed_document_ids(session)
         if len(doc_ids) > 1:
             # 多文档问答：并行 fan-out，每书独立检索后按相似度合流取全局 top_k
             from concurrent.futures import ThreadPoolExecutor
@@ -512,12 +519,19 @@ def build_qa_graph(
             per_doc = max(2, -(-total_k // len(doc_ids)))  # 按文档数 ceil 分配
 
             def _retrieve_one(doc_id: int):
+                if doc_id not in indexed_ids:
+                    return []
                 return retriever.retrieve(question, top_k=per_doc, document_id=doc_id)
 
             with ThreadPoolExecutor(max_workers=min(len(doc_ids), 8)) as executor:
                 grouped = list(executor.map(_retrieve_one, doc_ids))
             merged = sorted(
-                (hit for group in grouped for hit in group),
+                (
+                    hit
+                    for group in grouped
+                    for hit in group
+                    if hit.document_id in indexed_ids
+                ),
                 key=lambda hit: hit.score,
                 reverse=True,
             )[:total_k]
@@ -526,9 +540,11 @@ def build_qa_graph(
                 for document in list_documents(session):
                     if document.id in doc_ids:
                         titles[document.id] = document.filename
-            logger.info('问答[检索] q=%.30s docs=%s merged=%d', question, doc_ids, len(merged))
+            logger.info('问答[检索] q=%.30s docs=%s indexed=%s merged=%d',
+                        question, doc_ids, sorted(indexed_ids), len(merged))
             return {'chunks': [_chunk_to_dict(hit) for hit in merged], 'doc_titles': titles}
         hits = retriever.retrieve(question, document_id=state.get('document_id'))
+        hits = [hit for hit in hits if hit.document_id in indexed_ids]
         titles: dict[int, str] = {}
         doc_id = state.get('document_id')
         if doc_id is not None:

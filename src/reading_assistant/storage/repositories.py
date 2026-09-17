@@ -7,6 +7,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from reading_assistant.storage.models import ChatSession, Document, HitlTask, QaCacheEntry
+from reading_assistant.utils.logger_handler import get_logger
+
+logger = get_logger('storage')
+
+
+class DocumentNotFoundError(Exception):
+    """文档记录不存在：拒绝在缺失记录上继续写入或改状态。"""
 
 
 def get_document(session: Session, document_id: int) -> Document | None:
@@ -27,6 +34,13 @@ def get_document_by_content_hash(session: Session, content_hash: str) -> Documen
 def list_documents(session: Session) -> list[Document]:
     """列出全部文档（按入库顺序）。"""
     return list(session.scalars(select(Document).order_by(Document.id)))
+
+
+def list_indexed_document_ids(session: Session) -> set[int]:
+    """返回 ``index_status == 'indexed'`` 的文档 id 集合（检索层白名单）。"""
+    return set(
+        session.scalars(select(Document.id).where(Document.index_status == 'indexed'))
+    )
 
 
 def insert_document(session: Session, **fields) -> tuple[Document, bool]:
@@ -183,7 +197,12 @@ def list_qa_cache_entries(
 
 
 def update_document_index_status(session: Session, document_id: int, status: str) -> None:
+    """更新文档索引状态；记录不存在时告警并跳过（不得静默当作成功）。"""
     document = session.get(Document, document_id)
+    if document is None:
+        logger.warning('存储[状态] 文档记录不存在，跳过状态更新 doc=%s status=%s',
+                       document_id, status)
+        return
     document.index_status = status
 
 

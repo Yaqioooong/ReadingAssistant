@@ -113,6 +113,30 @@ def client(tmp_path: Path, populated_store: InMemoryVectorStore):
     engine.dispose()
 
 
+@pytest.fixture
+def seeded_client(tmp_path: Path, populated_store: InMemoryVectorStore):
+    """client 的变体：先登记「已索引」文档 id=1（对应 populated_store 的语料）。
+
+    检索层现在按 index_status 白名单过滤，问答类用例必须先让文档进入 indexed。
+    """
+    app, engine = _make_app(tmp_path, populated_store)
+    factory = create_session_factory(engine)
+    with factory() as session:
+        session.add(
+            Document(
+                filename='book.txt',
+                title='book',
+                file_hash='seed-hash',
+                content_hash='seed-content',
+                index_status='indexed',
+            )
+        )
+        session.commit()
+    with TestClient(app) as test_client:
+        yield test_client
+    engine.dispose()
+
+
 def _upload_txt(
     client: TestClient,
     filename: str = 'book.txt',
@@ -262,7 +286,8 @@ class TestSessions:
 
 
 class TestAsk:
-    def test_ask_returns_answer_and_records_messages(self, client: TestClient) -> None:
+    def test_ask_returns_answer_and_records_messages(self, seeded_client: TestClient) -> None:
+        client = seeded_client
         session_id = client.post('/api/sessions').json()['session_id']
 
         response = client.post(
@@ -288,7 +313,8 @@ class TestAsk:
 
         assert response.status_code == 422
 
-    def test_cache_hit_returns_citations(self, client: TestClient) -> None:
+    def test_cache_hit_returns_citations(self, seeded_client: TestClient) -> None:
+        client = seeded_client
         session_id = client.post('/api/sessions').json()['session_id']
         payload = {'question': '张三是谁', 'document_ids': [1]}
 

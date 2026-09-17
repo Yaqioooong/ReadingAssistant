@@ -38,6 +38,12 @@ def init_db(engine: Engine) -> None:
         column='summary',
         ddl='ALTER TABLE chat_sessions ADD COLUMN summary TEXT',
     )
+    _ensure_column(
+        engine,
+        table='documents',
+        column='index_started_at',
+        ddl='ALTER TABLE documents ADD COLUMN index_started_at TIMESTAMP',
+    )
 
 
 def _ensure_column(engine: Engine, table: str, column: str, ddl: str) -> None:

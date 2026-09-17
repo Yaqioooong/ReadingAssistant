@@ -49,6 +49,26 @@ class VectorStore(ABC):
         """删除指定文档的全部向量分块"""
 
     @abstractmethod
+    def delete_stale(
+        self,
+        document_id: int,
+        keep_content_hash: str,
+        keep_ids: list[str] | None = None,
+    ) -> int:
+        """删除 ``document_id`` 下不属于「当前版本」的分块，返回删除条数。
+
+        - ``keep_ids`` 为本次刚 upsert 的新版本 id 显式列表（首选判据）；
+        - 未提供 ``keep_ids`` 时，退化为「``metadata.content_hash ==
+          keep_content_hash`` 视为当前版本」（迁移 / 兼容场景）。
+        - 历史 chunk 可能缺失 ``content_hash`` 键，故在 **Python 侧** 过滤、
+          再按显式 id 列表删除；不使用 Chroma ``where={'content_hash': {'$ne': ...}}``
+          （``$ne`` 对缺失键的行为跨 Chroma 版本不可靠）。
+
+        顺序契约：调用方必须**先 upsert 新版本、再调用本方法**。若在两步之间
+        崩溃，只会留下「同内容重复」，不会出现错误内容、不会整篇丢失。
+        """
+
+    @abstractmethod
     def all_chunks(self) -> list[StoredChunk]:
         """返回库内全部分块（含文本与元数据），供 BM25 索引构建。"""
 
@@ -107,6 +127,28 @@ class ChromaVectorStore(VectorStore):
     def delete(self, document_id: int) -> None:
         self._collection.delete(where={'document_id': document_id})
         self._content_version += 1
+
+    def delete_stale(
+        self,
+        document_id: int,
+        keep_content_hash: str,
+        keep_ids: list[str] | None = None,
+    ) -> int:
+        keep = set(keep_ids) if keep_ids is not None else None
+        stale: list[str] = []
+        for chunk in self.all_chunks():
+            metadata = chunk.metadata or {}
+            if metadata.get('document_id') != document_id:
+                continue
+            if keep is not None:
+                if chunk.id not in keep:
+                    stale.append(chunk.id)
+            elif metadata.get('content_hash') != keep_content_hash:
+                stale.append(chunk.id)
+        if stale:
+            self._collection.delete(ids=stale)
+            self._content_version += 1
+        return len(stale)
 
     def all_chunks(self) -> list[StoredChunk]:
         """Chroma 全量拉取（含文本/元数据/向量），供 BM25 索引构建。"""
@@ -173,6 +215,28 @@ class InMemoryVectorStore(VectorStore):
             if self._chunks[chunk_id].metadata.get('document_id') == document_id:
                 del self._chunks[chunk_id]
         self._content_version += 1
+
+    def delete_stale(
+        self,
+        document_id: int,
+        keep_content_hash: str,
+        keep_ids: list[str] | None = None,
+    ) -> int:
+        keep = set(keep_ids) if keep_ids is not None else None
+        stale: list[str] = []
+        for chunk_id, chunk in self._chunks.items():
+            if chunk.metadata.get('document_id') != document_id:
+                continue
+            if keep is not None:
+                if chunk_id not in keep:
+                    stale.append(chunk_id)
+            elif chunk.metadata.get('content_hash') != keep_content_hash:
+                stale.append(chunk_id)
+        for chunk_id in stale:
+            del self._chunks[chunk_id]
+        if stale:
+            self._content_version += 1
+        return len(stale)
 
     def all_chunks(self) -> list[StoredChunk]:
         """内存实现：直接返回全部分块。"""

@@ -31,6 +31,8 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     # pending, indexing, indexed, failed
     index_status: Mapped[str] = mapped_column(String(16),nullable=False, default='pending') 
+    # 进入 indexing 的时刻：租约凭证；配合启动对账判定「卡死的 indexing」。
+    index_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 class ChatSession(Base):
     """一次对话会话。"""

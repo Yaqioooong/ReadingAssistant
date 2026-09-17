@@ -11,6 +11,7 @@ from reading_assistant.cli import create_cli
 from reading_assistant.storage import (
     ChatMessage,
     ChatSession,
+    Document,
     create_db_engine,
     create_session_factory,
     init_db,
@@ -99,8 +100,24 @@ class TestIngestCommand:
         assert '解析失败' in result.output
 
 
+def _seed_indexed_doc(env, document_id: int = 1) -> None:
+    """登记一条 index_status=='indexed' 的文档（检索白名单前置）。"""
+    with env['session_factory']() as session:
+        session.add(
+            Document(
+                filename='book.txt',
+                title='book',
+                file_hash=f'h{document_id}',
+                content_hash=f'c{document_id}',
+                index_status='indexed',
+            )
+        )
+        session.commit()
+
+
 class TestAskCommand:
     def test_ask_answers_and_creates_session(self, env) -> None:
+        _seed_indexed_doc(env)
         env['vector_store'].add(
             [
                 StoredChunk(
@@ -135,6 +152,7 @@ class TestAskCommand:
         session.commit()
         session_id = chat.id
         session.close()
+        _seed_indexed_doc(env)
         env['vector_store'].add(
             [
                 StoredChunk(

@@ -17,6 +17,7 @@ from reading_assistant.storage.models import (
     QaRequestEvent,
 )
 from reading_assistant.storage.repositories import (
+    DocumentNotFoundError,
     create_hitl_task,
     delete_session,
     get_document,
@@ -26,6 +27,7 @@ from reading_assistant.storage.repositories import (
     get_qa_cache_entry,
     insert_document,
     list_documents,
+    list_indexed_document_ids,
     list_qa_cache_entries,
     prune_qa_cache,
     reject_hitl_task,
@@ -57,6 +59,7 @@ __all__ = [
     'ChatSession',
     'ChromaVectorStore',
     'Document',
+    'DocumentNotFoundError',
     'QaCacheEntry',
     'QaFeedback',
     'QaRequestEvent',
@@ -83,6 +86,7 @@ __all__ = [
     'init_db',
     'insert_document',
     'list_documents',
+    'list_indexed_document_ids',
     'normalize_text',
     'normalize_question',
     'reject_hitl_task',

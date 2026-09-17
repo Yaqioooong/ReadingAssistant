@@ -1,6 +1,6 @@
 """RAG 层：文本分块与向量检索。"""
 
-from reading_assistant.rag.chunking import TextChunk, chunk_book, chunk_text
+from reading_assistant.rag.chunking import TextChunk, chunk_book, chunk_text, make_chunk_id
 from reading_assistant.rag.retriever import (
     HybridRetriever,
     RetrievedChunk,
@@ -18,4 +18,5 @@ __all__ = [
     'chunk_text',
     'create_retriever',
     'fuse_rrf',
+    'make_chunk_id',
 ]

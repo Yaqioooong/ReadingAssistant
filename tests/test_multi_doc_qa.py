@@ -37,10 +37,16 @@ def _make_env() -> tuple[TestClient, InMemoryVectorStore, int, int]:
     factory = create_session_factory(engine)
     with factory() as session:
         session.add(
-            Document(filename='书A.txt', title='书A', file_hash='hash-a', content_hash='content-a')
+            Document(
+                filename='书A.txt', title='书A', file_hash='hash-a',
+                content_hash='content-a', index_status='indexed',
+            )
         )
         session.add(
-            Document(filename='书B.txt', title='书B', file_hash='hash-b', content_hash='content-b')
+            Document(
+                filename='书B.txt', title='书B', file_hash='hash-b',
+                content_hash='content-b', index_status='indexed',
+            )
         )
         session.flush()
         ids = [d.id for d in (session.get(Document, 1), session.get(Document, 2))]
