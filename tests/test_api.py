@@ -17,6 +17,7 @@ from reading_assistant.storage import (
     create_session_factory,
     init_db,
 )
+from reading_assistant.storage.models import QaRequestEvent
 from reading_assistant.storage.vector_store import InMemoryVectorStore, StoredChunk
 
 
@@ -41,13 +42,6 @@ class FakeLLM:
 
     def invoke(self, prompt: str):
         return SimpleNamespace(content=self._content)
-
-
-class FakeNoInfoLLM(FakeLLM):
-    """模拟 LLM 判定原文信息不足。"""
-
-    def __init__(self) -> None:
-        super().__init__(content='原文中没有相关信息。')
 
 
 class _ToolResponse:
@@ -330,37 +324,70 @@ class TestAsk:
         assert body['citations'] == first.json()['citations']
         assert body['citations'][0]['excerpt']
 
-    def test_poisoned_cache_is_invalidated(self, tmp_path: Path) -> None:
-        """缓存里混入'信息不足'式回答时，命中后应丢弃并重新回答。"""
+    def _seed_refusal_row(self, session_factory) -> None:
+        """把已写入的缓存改成一条「信息不足」判定（拒答行的真实形态：answer 为 None）。"""
+        with session_factory() as session:
+            entry = session.scalar(select(QaCacheEntry))
+            assert entry is not None
+            entry.answer = None
+            entry.citations = []
+            entry.needs_clarification = True
+            entry.cached_chunk_count = 0
+            session.commit()
+
+    def test_refusal_cache_is_not_reused_after_clarification(self, tmp_path: Path) -> None:
+        """带澄清补充重问时，不能复用上次那条「信息不足」的判定。
+
+        精确通道撞不上车（``question_hash`` 把澄清文本算进去了），但**语义通道会**：
+        「Q」与「Q\n补充说明：…」的向量相似度通常 ≥ ``cache_similarity_threshold``，
+        于是用户补充信息后重问会命中旧拒答行、再次转 HITL，把刚给出的信息原样丢掉。
+
+        旧实现（按回答文本匹配词表）**结构上就够不到这个场景** ——
+        拒答缓存行的 ``answer`` 是 None，它连看都不会看一眼。
+        """
         app, engine = _make_app(tmp_path, InMemoryVectorStore())
         session_factory = create_session_factory(engine)
         with TestClient(app) as client:
             doc = _upload_txt(client).json()
             session_id = client.post('/api/sessions').json()['session_id']
             payload = {'question': '张三是谁', 'document_ids': [doc['id']]}
-
             first = client.post(f'/api/sessions/{session_id}/messages', json=payload)
             assert first.status_code == 200
+            self._seed_refusal_row(session_factory)
 
-            # 污染缓存：把刚生成的缓存回答改成"信息不足"式文本
-            with session_factory() as session:
-                entry = session.scalar(select(QaCacheEntry))
-                assert entry is not None
-                entry.answer = '原文中没有相关信息。'
-                session.commit()
-
-            # 再问同一问题：应拦截无效缓存并重新走 LLM 回答
-            again = client.post(f'/api/sessions/{session_id}/messages', json=payload)
+            again = client.post(
+                f'/api/sessions/{session_id}/messages',
+                json={**payload, 'clarification': '我说的是书里第一章那个张三'},
+            )
             assert again.status_code == 200
             body = again.json()
             assert body['needs_clarification'] is False
             assert body['answer'] == '这是基于原文的测试回答。'
-            assert body['citations'] != []
 
-            # 缓存应已重建为有效回答
             with session_factory() as session:
-                entry = session.scalar(select(QaCacheEntry))
-                assert entry.answer == '这是基于原文的测试回答。'
+                events = list(session.scalars(select(QaRequestEvent).order_by(QaRequestEvent.id)))
+            assert events[-1].cache_invalidated is True
+
+    def test_refusal_cache_still_served_without_clarification(self, tmp_path: Path) -> None:
+        """没有澄清补充时，拒答判定照旧复用 —— 保住「不重复跑 LLM」的优化，不误删。"""
+        app, engine = _make_app(tmp_path, InMemoryVectorStore())
+        session_factory = create_session_factory(engine)
+        with TestClient(app) as client:
+            doc = _upload_txt(client).json()
+            session_id = client.post('/api/sessions').json()['session_id']
+            payload = {'question': '张三是谁', 'document_ids': [doc['id']]}
+            assert client.post(
+                f'/api/sessions/{session_id}/messages', json=payload
+            ).status_code == 200
+            self._seed_refusal_row(session_factory)
+
+            body = client.post(f'/api/sessions/{session_id}/messages', json=payload).json()
+            assert body['needs_clarification'] is True
+
+            with session_factory() as session:
+                assert len(list(session.scalars(select(QaCacheEntry)))) == 1
+                events = list(session.scalars(select(QaRequestEvent).order_by(QaRequestEvent.id)))
+            assert events[-1].cache_invalidated is False
         engine.dispose()
 
     def test_same_question_across_documents_no_conflict(self, tmp_path: Path) -> None:
@@ -439,34 +466,6 @@ class TestHitl:
             assert missing.status_code == 404
         engine.dispose()
 
-    def test_llm_no_info_creates_hitl_task(self, tmp_path: Path) -> None:
-        """检索到片段但 LLM 判定信息不足时，自动创建澄清任务且不记录干瘪回答。"""
-        app, engine = _make_app(tmp_path, InMemoryVectorStore(), llm=FakeNoInfoLLM())
-        with TestClient(app) as client:
-            doc = _upload_txt(client).json()
-            session_id = client.post('/api/sessions').json()['session_id']
-
-            response = client.post(
-                f'/api/sessions/{session_id}/messages',
-                json={'question': '片段中没有答案的细节问题', 'document_ids': [doc['id']]},
-            )
-
-            assert response.status_code == 200
-            body = response.json()
-            assert body['needs_clarification'] is True
-            assert body['hitl_task_id'] is not None
-            assert body['answer'] is None
-
-            # LLM 那句"原文中没有相关信息"不应写入聊天记录
-            messages = client.get(f'/api/sessions/{session_id}/messages').json()
-            assert [m['role'] for m in messages] == ['user']
-
-            tasks = client.get(
-                '/api/hitl/tasks', params={'session_id': int(session_id)}
-            ).json()
-            assert tasks[0]['status'] == HitlTask.STATUS_AWAITING
-        engine.dispose()
-
     def test_tool_request_clarification_creates_hitl(self, tmp_path: Path) -> None:
         """模型调用 request_clarification 工具 → 自动创建澄清任务。"""
         app, engine = _make_app(
@@ -495,7 +494,51 @@ class TestHitl:
 
             messages = client.get(f'/api/sessions/{session_id}/messages').json()
             assert [m['role'] for m in messages] == ['user']
+
+            # 文档健康入库，这次判定应被缓存（避免同一问题重复跑 LLM）
+            factory = create_session_factory(engine)
+            with factory() as session:
+                entry = session.scalar(select(QaCacheEntry))
+                assert entry is not None
+                assert entry.needs_clarification is True
+                assert entry.answer is None
         engine.dispose()
+
+    def test_degraded_retrieval_verdict_is_not_cached(self, tmp_path: Path) -> None:
+        """回归：文档未入库完成时写下的「答不了」不得进缓存。
+
+        2026-09-17 实测故障：重复上传把文档 ``index_status`` 打回 ``indexing``，
+        而 QA 检索白名单只认 ``indexed`` → 整本书命中被过滤空 → 判「信息不足」并存进
+        ``qa_cache``；这类行命中后 ``route_after_cache`` 直接转 HITL、**跳过检索**，
+        于是索引修好了也永远回放假拒答（当时生产库积了 27 条）。
+
+        那类判定说的是「系统当时状态不对」，不是「书里没有」，所以根本不该被固化。
+        """
+        app, engine = _make_app(
+            tmp_path,
+            InMemoryVectorStore(),
+            llm=FakeToolLLM('request_clarification', {'missing_info': 'x'}),
+        )
+        factory = create_session_factory(engine)
+        with TestClient(app) as client:
+            doc = _upload_txt(client).json()
+            # 模拟「索引被误置为 indexing」的文档
+            with factory() as session:
+                document = session.get(Document, doc['id'])
+                document.index_status = 'indexing'
+                session.commit()
+
+            session_id = client.post('/api/sessions').json()['session_id']
+            body = client.post(
+                f'/api/sessions/{session_id}/messages',
+                json={'question': '张三是谁', 'document_ids': [doc['id']]},
+            ).json()
+            assert body['needs_clarification'] is True
+
+            with factory() as session:
+                assert list(session.scalars(select(QaCacheEntry))) == []
+        engine.dispose()
+
 
     def test_tool_final_answer_returns_answer(self, tmp_path: Path) -> None:
         """模型调用 final_answer 工具 → 正常回答并记录。"""

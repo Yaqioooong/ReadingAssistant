@@ -129,6 +129,7 @@ def save_qa_cache_entry(
     question_embedding: list | None = None,
     document_id: int | None = None,
     content_hash: str = '',
+    cached_chunk_count: int = 0,
 ) -> QaCacheEntry:
     """写入一条问答缓存；精确键已存在时更新内容并重置命中计数"""
     existing = get_qa_cache_entry(session, question_hash, content_hash, document_id)
@@ -138,6 +139,7 @@ def save_qa_cache_entry(
         existing.answer = answer
         existing.citations = citations or []
         existing.needs_clarification = needs_clarification
+        existing.cached_chunk_count = cached_chunk_count
         if question_embedding is not None:
             existing.question_embedding = question_embedding
         existing.hit_count = 0
@@ -153,6 +155,7 @@ def save_qa_cache_entry(
         needs_clarification=needs_clarification,
         document_id=document_id,
         content_hash=content_hash,
+        cached_chunk_count=cached_chunk_count,
     )
     session.add(entry)
     return entry

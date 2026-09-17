@@ -252,23 +252,38 @@ def request_clarification(missing_info: str) -> str:
     return missing_info
 
 
-_NO_INFO_MARKERS = (
-    '原文中没有相关信息',
-    '没有相关信息',
-    '原文未提及',
-    '原文没有',
-    '没有找到',
-    '无法根据原文',
-    '无法回答',
-    '信息不足',
-    '不足以回答',
-)
+def _retrieval_was_degraded(session, document_id: int | None) -> bool:
+    """本次检索是否在退化环境下进行（目标文档尚未入库完成）。
+
+    与检索层共用同一份白名单 ``list_indexed_document_ids()``，保证「检索拿不到片段」
+    与「判定这次回答不可信」用的是同一个信号，不会各自漂移。
+    """
+    indexed = list_indexed_document_ids(session)
+    if document_id is not None:
+        return document_id not in indexed
+    # 全库问答：一个可检索文档都没有，同样属于环境性失败
+    return not indexed
 
 
-def _looks_like_no_info(content: str) -> bool:
-    """启发式检测：LLM 是否判定原文信息不足（只看回答开头 80 字符）。"""
-    head = (content or '').strip()[:80]
-    return any(marker in head for marker in _NO_INFO_MARKERS)
+def _is_stale_refusal(entry, state) -> bool:
+    """缓存里是一条「信息不足」的判定，但本轮带了澄清补充 → 该判定已不适用。
+
+    为什么要这一条：精确通道撞不上车（``question_hash`` 把澄清文本算进去了），
+    但**语义通道会** —— 「Q」与「Q\n补充说明：…」的向量相似度通常 ≥
+    ``cache_similarity_threshold``，于是用户补充信息后重问，会命中旧的拒答行、
+    再次转 HITL，把用户刚提供的信息原样丢掉。
+
+    注意旧实现（按 ``entry.answer[:80]`` 匹配词表）**结构上就够不到这里**：
+    拒答缓存行的 ``answer`` 是 None，它连看都不会看一眼。
+
+    这里刻意**不**用 ``cached_chunk_count`` 判断陈旧：对加列前的历史行它是
+    DEFAULT 0（含义是「未知」，不是「当时没检索到」），而按 0 清理会误删
+    「拿 A 书的问题问 B 书」这类正当拒答。防新增靠 create_hitl 的写入门禁，
+    读时只处理「判定对本轮已不适用」这一种确定情形。
+    """
+    if not (getattr(entry, 'needs_clarification', False) and entry.answer is None):
+        return False
+    return bool(state.get('clarification'))
 
 
 def _is_cache_expired(entry, ttl_days: int) -> bool:
@@ -437,9 +452,9 @@ def build_qa_graph(
                                 'question_embedding': embedding,
                                 'cache_channel': 'miss',
                             }
-                        if best_entry.answer and _looks_like_no_info(best_entry.answer):
-                            # 无效缓存：信息不足式回答不应被缓存，删除并重新回答
-                            logger.warning('问答[缓存] 丢弃无效回答缓存 id=%s channel=%s q=%.30s',
+                        if _is_stale_refusal(best_entry, state):
+                            # 环境性失败期间写入的「答不了」，环境已恢复 → 删除并重新回答
+                            logger.warning('问答[缓存] 丢弃陈旧拒答缓存 id=%s channel=%s q=%.30s',
                                            best_entry.id, channel, state['question'])
                             session.delete(best_entry)
                             return {
@@ -481,9 +496,9 @@ def build_qa_graph(
                 logger.info('问答[缓存] 精确条目已过期丢弃 q=%.30s', state['question'])
                 return {'cache_hit': False, 'question_hash': question_hash,
                         'cache_channel': 'miss'}
-            if entry.answer and _looks_like_no_info(entry.answer):
-                # 无效缓存：信息不足式回答不应被缓存，删除并重新回答
-                logger.warning('问答[缓存] 丢弃无效回答缓存 id=%s channel=exact q=%.30s',
+            if _is_stale_refusal(entry, state):
+                # 环境性失败期间写入的「答不了」，环境已恢复 → 删除并重新回答
+                logger.warning('问答[缓存] 丢弃陈旧拒答缓存 id=%s channel=%s q=%.30s',
                                entry.id, state['question'])
                 session.delete(entry)
                 return {'cache_hit': False, 'question_hash': question_hash,
@@ -572,7 +587,21 @@ def build_qa_graph(
                 session, session_id=state.get('session_id'), question=state['question']
             )
             settings = get_settings()
-            if settings.cache_enabled and state.get('question_hash') and not state.get('cache_hit'):
+            # ⚠️ 退化环境下（目标文档没入库完成）的「答不了」不写缓存：
+            # 那不是关于书内容的结论，而是关于系统状态的结论，修好索引后必然过期。
+            # 2026-09-17 实测：文档被误置为 indexing 期间整本书的检索被打空，
+            # 这些假拒答落进 qa_cache 后会永久回放（缓存命中直接转 HITL、跳过检索）。
+            doc_id = state.get('document_id')
+            degraded = _retrieval_was_degraded(session, doc_id)
+            if degraded:
+                logger.warning('问答[HITL] 检索环境退化（doc=%s 未入库完成），本次判定不写缓存',
+                               doc_id)
+            if (
+                settings.cache_enabled
+                and state.get('question_hash')
+                and not state.get('cache_hit')
+                and not degraded
+            ):
                 doc_id = state.get('document_id')
                 save_qa_cache_entry(
                     session,
@@ -584,6 +613,7 @@ def build_qa_graph(
                     document_id=doc_id,
                     content_hash=_document_content_hash(session, doc_id),
                     question_embedding=state.get('question_embedding'),
+                    cached_chunk_count=len(state.get('chunks') or []),
                 )
                 prune_qa_cache(session, settings.cache_max_entries)
             return {'hitl_task_id': task.id}
@@ -635,11 +665,6 @@ def build_qa_graph(
             # 兜底 1：模型未走工具，按纯文本处理
             content = response.content if hasattr(response, 'content') else str(response)
             logger.info('问答[answer] 纯文本回答 len=%d (%.0fms)', len(content), cost_ms)
-            # 兜底 2：纯文本含"信息不足"措辞 → 仍转 HITL
-            if not state.get('clarification') and _looks_like_no_info(content):
-                logger.info('问答[answer] 文本兜底判定信息不足，转入 HITL q=%.30s',
-                            state['question'])
-                return {'needs_clarification': True, 'answer': None, 'citations': []}
         titles = state.get('doc_titles') or {}
         all_citations = []
         for index, chunk in enumerate(state.get('chunks') or [], start=1):
@@ -678,6 +703,7 @@ def build_qa_graph(
                     document_id=doc_id,
                     content_hash=_document_content_hash(session, doc_id),
                     question_embedding=state.get('question_embedding'),
+                    cached_chunk_count=len(state.get('chunks') or []),
                 )
                 prune_qa_cache(session, settings.cache_max_entries)
         return {'answer': content, 'citations': citations}

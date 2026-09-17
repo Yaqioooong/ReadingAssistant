@@ -100,6 +100,13 @@ class QaCacheEntry(Base):
     needs_clarification: Mapped[bool] = mapped_column(Boolean, default=False)
     document_id: Mapped[int | None] = mapped_column(ForeignKey('documents.id'), index=True)
     content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    # 该回答所依据的片段数，用于区分「环境性失败」（0 个片段）与「书里确实没有」。
+    #
+    # ⚠️ 加列前的历史行全部是 DEFAULT 0 —— 对这些行来说 0 的含义是「**未知**」，
+    # 不是「当时没检索到」。所以**不要**用它去做历史数据清理：
+    # 2026-09-17 实测，库里 27 条 needs_clarification 行大多是「拿 A 书的问题问 B 书」
+    # 这类**正当**拒答（如向《名词大动词》问「张三喜欢谁？」），按 0 清理会误删它们。
+    cached_chunk_count: Mapped[int] = mapped_column(Integer, default=0)
     hit_count: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_hit_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)

@@ -27,7 +27,6 @@ from reading_assistant.storage.models import (
 from reading_assistant.storage.vector_store import InMemoryVectorStore, StoredChunk
 
 ANSWER = '镇元子住在万寿山五庄观。'
-DIRTY_ANSWER = '原文中没有相关信息。'
 SEMANTIC_Q1, SEMANTIC_Q2 = '乙喜欢谁？', '乙喜欢的是谁？'
 # 注意：'P002产品的…' 归一化后与 Q1 完全相同（会走 exact），故 Q2 需去掉「产品」二字
 ID_Q1 = 'P-002产品的上市时间是什么时候？'
@@ -173,22 +172,41 @@ class TestRequestEvents:
             assert all(e.question for e in events)
             assert events[1].cache_hit is True
 
-    def test_dirty_cache_marks_invalidated(self, tmp_path: Path) -> None:
+    def test_stale_refusal_cache_marks_invalidated(self, tmp_path: Path) -> None:
+        """带澄清补充重问时，旧拒答缓存应被标记失效并重新回答。
+
+        判据已从「回答文本像不像拒答」（``content[:80]`` 词表匹配）换成结构性判断：
+        拒答行 + 本轮带澄清 → 该判定不再适用。
+
+        这不只是为了消掉字符串匹配的双向误判 —— 拒答缓存行的 ``answer`` 是 ``None``，
+        旧实现**结构上就够不到这个场景**：用户补充信息后重问，语义通道会命中旧拒答行，
+        再次转 HITL，把刚提供的信息原样丢掉。
+        """
         client, factory = _build(tmp_path)
         with client:
             sid = client.post('/api/sessions').json()['session_id']
             _ask(client, sid, '甲喜欢谁？', 1)
-            # 把已写入的缓存改成"信息不足式"回答，模拟脏缓存
+            # 模拟一条「信息不足」判定（拒答行的真实形态：answer 为空）
             with factory() as session:
                 entry = session.scalars(select(QaCacheEntry)).first()
-                entry.answer = DIRTY_ANSWER
+                assert entry is not None
+                entry.answer = None
+                entry.citations = []
+                entry.needs_clarification = True
+                entry.cached_chunk_count = 0
                 session.commit()
-            again = _ask(client, sid, '甲喜欢谁？', 1)
+            again = client.post(
+                f'/api/sessions/{sid}/messages',
+                json={
+                    'question': '甲喜欢谁？',
+                    'document_ids': [1],
+                    'clarification': '我问的是文档一里那个甲',
+                },
+            ).json()
             assert again['cache_hit'] is False
             with factory() as session:
                 events = list(session.scalars(select(QaRequestEvent).order_by(QaRequestEvent.id)))
             assert events[-1].cache_invalidated is True
-
 
 class TestSkippedTurns:
     """闲聊/历史类轮次不经 cache_check，应归为 skipped 而非混入命中率分母。"""

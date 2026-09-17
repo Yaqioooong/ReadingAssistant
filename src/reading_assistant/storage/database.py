@@ -44,6 +44,12 @@ def init_db(engine: Engine) -> None:
         column='index_started_at',
         ddl='ALTER TABLE documents ADD COLUMN index_started_at TIMESTAMP',
     )
+    _ensure_column(
+        engine,
+        table='qa_cache',
+        column='cached_chunk_count',
+        ddl='ALTER TABLE qa_cache ADD COLUMN cached_chunk_count INTEGER NOT NULL DEFAULT 0',
+    )
 
 
 def _ensure_column(engine: Engine, table: str, column: str, ddl: str) -> None:
