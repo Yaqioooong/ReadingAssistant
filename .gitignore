@@ -31,3 +31,5 @@ eval/retrieval_gold.json
 
 # 测试临时产物
 tests/_mcp_book_tmp/
+/docs/
+/interview-prep/
