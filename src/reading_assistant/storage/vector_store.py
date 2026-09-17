@@ -19,7 +19,11 @@ class StoredChunk:
 
 @dataclass
 class SearchHit:
-    """检索结果。"""
+    """检索结果。
+
+    ``score`` 统一为**余弦相似度**（越大越相关，范围约 [-1, 1]），
+    便于稠密 / 稀疏两路共用同一个 ``min_score`` 阈值。
+    """
 
     id: str
     score: float
@@ -38,7 +42,7 @@ class VectorStore(ABC):
     def query(
         self, embedding: list[float], top_k: int = 6, where: dict | None = None
     ) -> list[SearchHit]:
-        """按向量检索 top-k 分块。"""
+        """按向量检索 top-k 分块；``score`` 为余弦相似度。"""
 
     @abstractmethod
     def count(self) -> int:
@@ -86,6 +90,10 @@ class ChromaVectorStore(VectorStore):
         self._collection = self._client.get_or_create_collection(
             name=collection_name or settings.chroma_collection_name
         )
+        # 距离空间：Chroma 默认 l2（现有集合 metadata 为 None → l2）。
+        # 用于把 distance 换算成统一的余弦相似度。
+        metadata = self._collection.metadata or {}
+        self._space = str(metadata.get('hnsw:space') or metadata.get('space') or 'l2').lower()
         self._content_version = 0  # 写入版本号：add/delete 自增，供 BM25 索引失效检测
 
     def add(self, chunks: list[StoredChunk]) -> None:
@@ -113,13 +121,24 @@ class ChromaVectorStore(VectorStore):
         return [
             SearchHit(
                 id=chunk_id,
-                # Chroma 返回的是距离（越小越相关），统一转成 0~1 相似度（越大越相关）
-                score=1.0 / (1.0 + distances[index]) if index < len(distances) else 0.0,
+                score=self._distance_to_cosine(
+                    distances[index] if index < len(distances) else 2.0
+                ),
                 metadata=metadatas[index] or {},
                 text=documents[index] or '',
             )
             for index, chunk_id in enumerate(ids)
         ]
+
+    def _distance_to_cosine(self, distance: float) -> float:
+        """把 Chroma 距离换算成余弦相似度（统一量纲）。
+
+        本项目 embedding 已归一化（DashScope），因此：
+        - cosine 空间：Chroma 距离 = 1 - cos → ``cos = 1 - dist``
+        - l2 空间（默认）：Chroma 返回**平方**欧氏距离 = 2 - 2cos → ``cos = 1 - dist/2``
+        """
+        cosine = 1.0 - distance if self._space == 'cosine' else 1.0 - distance / 2.0
+        return max(-1.0, min(1.0, cosine))
 
     def count(self) -> int:
         return self._collection.count()

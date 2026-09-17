@@ -9,6 +9,11 @@ separators: ["\n\n", "\n", ".", "!", "?", "。", "！", "？", " ", ""]
 
 # --- 检索模式（vector=纯稠密；hybrid=BM25+稠密 RRF 融合） ---
 retrieval_mode: hybrid
+# 每路候选池大小。⚠️ 与 rrf_k 强耦合：必须满足不变量 rrf_k > hybrid_pool_size - 2，
+# 否则 RRF 融合语义会静默翻转（单路强命中压过双路共现，见 rag/retriever.py::fuse_rrf）。
+#   模式 A（不变量成立，如 pool=50 / rrf_k=60）：双路共现的片段优先——RRF 正常语义。
+#   模式 B（不变量被破坏，如 pool=70 而 rrf_k=60）：融合退化为「谁先谁上」，双路一致不再被奖励。
+# 调整 hybrid_pool_size 时请同步调大 rrf_k，或保持 rrf_k >= hybrid_pool_size + 12。
 hybrid_pool_size: 50
 rrf_k: 60
 bm25_tokenizer: jieba

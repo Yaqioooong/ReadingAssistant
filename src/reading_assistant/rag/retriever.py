@@ -12,6 +12,9 @@ from reading_assistant.config import get_settings
 from reading_assistant.model.factory import get_embedding_model
 from reading_assistant.storage import normalize_question, sha256_hex
 from reading_assistant.storage.vector_store import VectorStore
+from reading_assistant.utils.logger_handler import get_logger
+
+logger = get_logger('retriever')
 
 
 @dataclass
@@ -52,7 +55,11 @@ class Retriever:
         top_k: int | None = None,
         document_id: int | None = None,
     ) -> list[RetrievedChunk]:
-        """检索与 query 最相关的 top-k 片段。"""
+        """检索与 query 最相关的 top-k 片段。
+
+        ``min_score`` 是**余弦相似度**阈值：向量库返回的 ``hit.score`` 已由
+        :class:`~reading_assistant.storage.vector_store.VectorStore` 统一换算为余弦。
+        """
         settings = get_settings()
         k = top_k or settings.top_k
         embedding = self._embed(query)
@@ -156,6 +163,24 @@ def fuse_rrf(rankings: list[list[str]], k: int = 60) -> list[str]:
     """RRF 融合：对多路有序 id 列表按 Σ 1/(k+rank) 打分后降序。
 
     纯函数、与具体检索实现解耦，便于单测。
+
+    **隐式不变量**：``fuse_rrf`` 与候选池大小 ``pool``（``hybrid_pool_size``）
+    通过 ``rrf_k`` 强耦合。设两路各召回 ``pool`` 条、每路内 id 互不相同，
+    则对某一 id 而言：
+
+    - **双路命中**（两路都进池）：最低分出现在 rank=pool 且同 id 恰好是两路
+      最后一名时，为 ``2/(k+pool)``。
+    - **单路命中**（只在一路进池）：最高分是 rank=1 时的 ``1/(k+1)``。
+
+    故「双路必然碾压单路」⟺ ``2/(k+pool) > 1/(k+1)`` ⟺ ``k > pool - 2``。
+
+    - ``k > pool - 2``（默认 60 > 48）：RRF 正常语义——**两路共现的片段优先**，
+      单路强命中排在双路弱命中之后。
+    - ``k <= pool - 2``：语义**静默翻转**——单路 rank1 的分数反而 ≥ 双路最低分，
+      融合退化为「谁先谁上」，双路一致性不再被奖励。
+
+    例如把 ``hybrid_pool_size`` 调到 70（阈值 68），保持 ``k=60`` 时
+    ``60 < 68`` 即触发翻转。创建 :class:`HybridRetriever` 时会对此校验告警。
     """
     scores: dict[str, float] = {}
     for ranked in rankings:
@@ -165,11 +190,11 @@ def fuse_rrf(rankings: list[list[str]], k: int = 60) -> list[str]:
 
 
 class HybridRetriever(Retriever):
-    """稠密向量 + BM25 双路召回，RRF 融合后按稠密质量分把关。
+    """稠密向量 + BM25 双路召回，RRF 融合后按**余弦**质量分把关。
 
     - 稠密路：向量库 top ``pool_size``（不过 min_score，交由最终闸门）
     - 稀疏路：BM25 索引 top ``pool_size``（进程内、随向量库版本失效重建）
-    - 融合：RRF(k=rrf_k) 取 top_k；最终结果仍要求稠密余弦 ≥ min_score
+    - 融合：RRF(k=rrf_k) 取 top_k；最终结果仍要求**余弦相似度** ≥ min_score
       （不在稠密候选池内的结果用存储向量现算余弦，避免稀疏路引入低质噪音）
     """
 
@@ -185,11 +210,27 @@ class HybridRetriever(Retriever):
         settings = get_settings()
         self._pool_size = pool_size or settings.hybrid_pool_size
         self._rrf_k = rrf_k or settings.rrf_k
+        self._check_rrf_invariant()
         from reading_assistant.rag.bm25_index import BM25Index
 
         self._bm25 = BM25Index.get_for(
             vector_store, tokenizer=bm25_tokenizer or settings.bm25_tokenizer
         )
+
+    def _check_rrf_invariant(self) -> None:
+        """校验 RRF 不变量 ``rrf_k > pool_size - 2``，不满足则明确告警。
+
+        不满足时融合语义会**静默翻转**：单路 rank1 命中不再必然输给双路共现，
+        「双路一致性」这一 RRF 的核心收益失效（详见 :func:`fuse_rrf`）。
+        """
+        if self._rrf_k <= self._pool_size - 2:
+            logger.warning(
+                '混合检索[配置] RRF 不变量被破坏：rrf_k=%d <= pool_size-2=%d。'
+                '后果：单路强命中可能压过双路共现，RRF「双路优先」语义静默翻转；'
+                '请调大 rrf_k 或调小 hybrid_pool_size。',
+                self._rrf_k,
+                self._pool_size - 2,
+            )
 
     def retrieve(
         self,
