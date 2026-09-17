@@ -20,6 +20,7 @@ from reading_assistant.storage import (
     HitlTask,
     QaRequestEvent,
     delete_session,
+    find_answer_for_clarification,
     session_scope,
 )
 from reading_assistant.utils.logger_handler import get_logger
@@ -142,6 +143,25 @@ def ask_question(
     import time
 
     _ensure_session(session, session_id)
+
+    # 幂等护栏：这次澄清是否已经产出过回答？
+    # 客户端契约在 2026-09-17 变更为「提交澄清 = 服务端从断点恢复并生成回答」，
+    # 但**重发**的来源很杂：未重建的旧前端（提交后仍重发原问题）、双击、网络重试。
+    # 不拦的话就会在恢复生成一次之外再生成一次 —— 用户看到连续两条回答。
+    if payload.clarification:
+        prior = find_answer_for_clarification(session, session_id, payload.clarification)
+        if prior is not None:
+            logger.info(
+                '提问[幂等] 该澄清已产生过回答，直接复用 session_id=%s message_id=%s',
+                session_id, prior.id,
+            )
+            return schemas.AskResponse(
+                answer=prior.content,
+                citations=(prior.meta or {}).get('citations') or [],
+                needs_clarification=False,
+                cache_hit=False,
+                cache_channel='clarification_replay',
+            )
 
     doc_ids = payload.document_ids or []
     # 单文档走原 document_id 路径（缓存友好）；多文档走 fan-out 并行检索

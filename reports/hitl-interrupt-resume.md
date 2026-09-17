@@ -139,3 +139,80 @@ uv run pytest tests/test_hitl_resume.py -q -m postgres   # 跨进程那条（需
 
 收益仍然实在（少一次 embedding 往返 + 检索器级缓存跨请求生效），但**不是**秒级。
 单例化真正的必要性在**正确性**：恢复要求「同一张图 + 同一个 saver」。
+
+
+---
+
+## 八、修复「澄清后连续回复两次」（2026-09-17 追加）
+
+### 现象
+
+提交澄清后出现**两条**回答，且引用编号不同（第五十四回 vs 第二十七回）——
+说明是两次真实生成，不是同一条消息显示两遍。
+
+### 根因：前端构建产物过期 + 服务端不设防
+
+`app.py` 从 `frontend/dist` 提供静态文件，而 `frontend/dist` **被 gitignore**。
+本次改造改了 `ChatPanel.vue`，但 dist 停留在三天前：
+
+```
+frontend/dist/assets/index-B8QIdo_7.js   Sep 14 10:02   ← 浏览器实际跑的
+frontend/src/components/ChatPanel.vue    Sep 17 16:35   ← 我改的
+dist 里搜不到 "resumed" → 旧逻辑
+```
+
+旧前端逻辑是「提交澄清 → **无条件重发原问题**」。改造后后端已经会
+「提交澄清 = 从断点恢复并生成回答」，于是：
+
+| 步骤 | 来源 | 结果 |
+| --- | --- | --- |
+| 1 | 后端恢复 | 第 1 条回答（写入 DB） |
+| 2 | 旧前端重发原问题 | 第 2 条回答（写入 DB） |
+
+两个版本**各自都跑得通**，只是行为不同 —— 又是一次静默失效。
+
+### 修复（两层）
+
+1. **前端**：`resumed=true` 时直接用返回的答案，不再重发；仅在后端明确降级
+   （`resumed=false`）时才回退重发。**必须 `npm run build`**（dist 不进版本控制）。
+2. **服务端幂等**（不信任客户端）：新增
+   `storage.find_answer_for_clarification()` —— 若「最近一轮」恰为
+   `[user: 补充说明：<原文>, assistant: <回答>]` 且澄清文本逐字相等，则：
+
+   - `POST /api/sessions/{id}/messages`（带同一澄清）→ 直接复用那条回答，
+     `cache_channel='clarification_replay'`，**不再触发生成**；
+   - `POST /api/hitl/tasks/{id}/submit` 重复提交 → 幂等返回同一答案（原来是 400，
+     用户会看到「提交失败」但其实上一次已经成功了）。
+
+   判定刻意只认最近两条消息，避免误伤「用户之后再问别的」。
+
+### 为什么第 2 层不可省
+
+重复**不只来自旧前端**：双击提交、网络重试、以后任何客户端 bug 都会重发。
+只修前端 = 把正确性寄托在「所有客户端都及时更新」上，而这个假设刚刚被打破过一次。
+
+### 验证
+
+```
+1) 提问            → 挂起 task=1                        生成次数=1
+2) 提交澄清        → resumed=True 答案='回答第2次生成。'  生成次数=2
+3) 旧前端重发原问题 → channel=clarification_replay       生成次数=2  ← 没有第二次生成
+4) 双击提交同一任务 → HTTP 200 幂等                      生成次数=2
+5) 会话历史        → assistant 条数 = 1  ✓
+```
+
+回归测试 `tests/test_hitl_resume.py::TestDuplicateReplyGuard`（3 条）。
+反证：拆掉幂等护栏后 `test_replayed_ask_reuses_answer_instead_of_regenerating` 立即失败。
+
+### 附带加固：启动时检测 dist 是否过期
+
+`app.py::_warn_if_frontend_build_is_stale()` —— 比较 `frontend/src` 与
+`frontend/dist` 的 mtime，源码更新时启动告警：
+
+```
+WARNING - 前端构建产物已过期（src 比 dist 新）——线上跑的仍是旧逻辑。
+          请执行：cd frontend && npm run build
+```
+
+因为 `frontend/dist` 被 gitignore，部署链路里本来就缺一道「产物是否对应当前源码」的检查，
+这个告警把它补上。仅告警、不阻断启动（开发用 vite dev server 时本就无视 dist）。

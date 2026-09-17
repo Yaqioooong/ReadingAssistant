@@ -21,6 +21,36 @@ from reading_assistant.utils.path_tools import get_abs_path
 logger = get_logger('api')
 
 
+def _warn_if_frontend_build_is_stale() -> None:
+    """前端构建产物若落后于源码，启动时告警。
+
+    为什么需要：``app`` 是从 ``frontend/dist`` 提供静态文件的，源码改了不 rebuild
+    就**静默**跑旧逻辑 —— 两个版本各自都跑得通，只是行为不同。
+
+    2026-09-17 实测踩到：后端已改成「提交澄清 = 从断点恢复并生成回答」，
+    但 dist 是三天前构建的，旧前端仍会「提交后重发原问题」，
+    于是恢复生成一条、重发又生成一条 —— 用户看到「连续回复了两次」。
+
+    仅告警、不阻断启动（开发时本就用 vite dev server）。
+    """
+    try:
+        dist_assets = Path(get_abs_path('frontend/dist/assets'))
+        src_dir = Path(get_abs_path('frontend/src'))
+        if not dist_assets.is_dir() or not src_dir.is_dir():
+            return
+        built = [p.stat().st_mtime for p in dist_assets.iterdir() if p.is_file()]
+        sources = [p.stat().st_mtime for p in src_dir.rglob('*') if p.is_file()]
+        if not built or not sources:
+            return
+        if max(sources) > max(built):
+            logger.warning(
+                '前端构建产物已过期（src 比 dist 新）——线上跑的仍是旧逻辑。'
+                '请执行：cd frontend && npm run build'
+            )
+    except Exception:  # noqa: BLE001 纯提示，任何异常都不该影响启动
+        pass
+
+
 def _reconcile_index_status_on_startup() -> None:
     """启动对账：把崩溃残留的 ``indexing`` 记录拉回 indexed / failed。
 
@@ -65,6 +95,7 @@ def create_app(
             init_db(create_db_engine())
             _reconcile_index_status_on_startup()
         logger.info('ReadingAssistant API 启动')
+        _warn_if_frontend_build_is_stale()
         try:
             yield
         finally:

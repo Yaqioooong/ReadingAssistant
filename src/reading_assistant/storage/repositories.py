@@ -6,7 +6,13 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from reading_assistant.storage.models import ChatSession, Document, HitlTask, QaCacheEntry
+from reading_assistant.storage.models import (
+    ChatMessage,
+    ChatSession,
+    Document,
+    HitlTask,
+    QaCacheEntry,
+)
 from reading_assistant.utils.logger_handler import get_logger
 
 logger = get_logger('storage')
@@ -95,6 +101,43 @@ def get_or_create_hitl_task(
     if existing is not None:
         return existing
     return create_hitl_task(session, session_id, question, thread_id=thread_id)
+
+
+def find_answer_for_clarification(
+    session: Session, session_id: int | None, clarification: str
+) -> ChatMessage | None:
+    """这次澄清是否**已经**产生过回答；有则返回那条回答消息。
+
+    用途：幂等。客户端契约变更后（提交澄清 = 服务端从断点恢复并生成回答），
+    任何「重发」都会造成第二次生成 —— 而重发的来源很杂：
+    旧版本前端（提交后仍会重发原问题）、双击、网络重试。
+
+    实测到的真实故障（2026-09-17）：前端 dist 未随源码重建，旧逻辑
+    「先提交澄清，再重发原问题」照常执行，于是后端恢复生成一次、
+    重发又生成一次 —— 用户看到连续两条回答。
+
+    判定刻意**只认最近一轮**：最后两条消息恰为
+    ``[user: 补充说明：<原文>, assistant: <回答>]`` 且澄清文本逐字相等。
+    越界的一律当新问题，避免误伤（例如用户之后再问别的）。
+    """
+    if session_id is None or not clarification:
+        return None
+    rows = list(
+        session.scalars(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.id.desc())
+            .limit(2)
+        )
+    )
+    if len(rows) < 2:
+        return None
+    answer, prompt = rows[0], rows[1]
+    if answer.role != 'assistant' or prompt.role != 'user':
+        return None
+    if prompt.content != f'补充说明：{clarification}':
+        return None
+    return answer
 
 
 def get_hitl_task_by_thread(session: Session, thread_id: str) -> HitlTask | None:

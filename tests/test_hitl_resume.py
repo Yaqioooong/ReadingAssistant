@@ -23,10 +23,12 @@ import pytest
 from fastapi.testclient import TestClient
 from langchain_core.embeddings import Embeddings
 from langgraph.checkpoint.memory import InMemorySaver
+from sqlalchemy import select
 
 from reading_assistant.api import create_app
 from reading_assistant.graph import interrupt_payload, interrupt_task_id
 from reading_assistant.storage import (
+    ChatMessage,
     Document,
     HitlTask,
     create_db_engine,
@@ -207,15 +209,34 @@ class TestResume:
             assert [m['role'] for m in messages][-1] == 'assistant'
         engine.dispose()
 
-    def test_repeated_submit_is_rejected(self, tmp_path: Path) -> None:
-        """任务只能被 approved 一次 —— 否则会重复恢复。"""
-        app, engine, _ = _make_app(tmp_path, InMemoryVectorStore())
+    def test_repeated_submit_is_idempotent(self, tmp_path: Path) -> None:
+        """重复提交必须幂等：拿到同一份答案，而不是再生成一次或报错。
+
+        双击、网络重试、旧版本客户端都会重发 —— 之前这里返回 400，
+        用户看到「提交失败」但其实上一次已经成功了。
+        """
+        app, engine, factory = _make_app(tmp_path, InMemoryVectorStore(), llm=FakeLLM('答案。'))
         with TestClient(app) as client:
             sid = client.post('/api/sessions').json()['session_id']
             body = _ask(client, sid, '问题？')
             url = f'/api/hitl/tasks/{body["hitl_task_id"]}/submit'
-            assert client.post(url, json={'clarification': '第一次'}).status_code == 200
-            assert client.post(url, json={'clarification': '第二次'}).status_code == 400
+
+            first = client.post(url, json={'clarification': '第一次'}).json()
+            second = client.post(url, json={'clarification': '第一次'})
+
+            assert second.status_code == 200
+            again = second.json()
+            assert again['resumed'] is True
+            assert again['answer'] == first['answer']
+
+            # 会话里不应因此多出一条回答
+            with factory() as session:
+                answers = list(
+                    session.scalars(
+                        select(ChatMessage).where(ChatMessage.role == 'assistant')
+                    )
+                )
+            assert len(answers) == 1
         engine.dispose()
 
     def test_resume_after_normal_answer_is_not_possible(self, tmp_path: Path) -> None:
@@ -381,3 +402,90 @@ def test_cross_process_resume_with_postgres(tmp_path: Path, monkeypatch) -> None
         engine.dispose()
         monkeypatch.delenv('CACHE_ENABLED', raising=False)
         get_settings.cache_clear()
+
+
+class TestDuplicateReplyGuard:
+    """回归：澄清提交后不得出现「连续两条回答」。
+
+    2026-09-17 实测故障：前端 dist 未随源码重建，旧逻辑在提交澄清之后
+    **仍会重发原问题**。而后端此时已经会「从断点恢复并生成回答」，
+    于是生成两次 —— 用户看到两条回答（引用编号不同，说明是真跑了两次）。
+
+    修复分两层：
+    1. 前端：resumed=true 时直接用返回的答案，不再重发（须重建 dist）；
+    2. 后端：对「这次澄清是否已产生过回答」做幂等判断（不信任客户端）。
+    本类锁住第 2 层 —— 它是客户端版本无关的那一层。
+    """
+
+    def test_replayed_ask_reuses_answer_instead_of_regenerating(self, tmp_path: Path) -> None:
+        llm = FakeLLM('答案。')
+        app, engine, factory = _make_app(tmp_path, InMemoryVectorStore(), llm=llm)
+        with TestClient(app) as client:
+            sid = client.post('/api/sessions').json()['session_id']
+            body = _ask(client, sid, '张三喜欢谁？')
+            task_id = body['hitl_task_id']
+            assert task_id is not None
+
+            client.post(
+                f'/api/hitl/tasks/{task_id}/submit', json={'clarification': '张三是唐僧'}
+            )
+            calls_after_resume = llm.calls
+
+            # 旧前端会做的动作：带同一澄清重发原问题
+            replay = client.post(
+                f'/api/sessions/{sid}/messages',
+                json={
+                    'question': '张三喜欢谁？',
+                    'document_ids': [],
+                    'clarification': '张三是唐僧',
+                },
+            ).json()
+
+            assert replay['answer'] == '答案。'
+            assert replay['cache_channel'] == 'clarification_replay'
+            # 关键：没有触发第二次生成
+            assert llm.calls == calls_after_resume
+
+            # 会话里只有一条 assistant 回答
+            with factory() as session:
+                answers = list(
+                    session.scalars(
+                        select(ChatMessage).where(ChatMessage.role == 'assistant')
+                    )
+                )
+            assert len(answers) == 1
+
+    def test_replayed_ask_returns_citations_from_stored_message(self, tmp_path: Path) -> None:
+        app, engine, _ = _make_app(tmp_path, _populated_store())
+        with TestClient(app) as client:
+            sid = client.post('/api/sessions').json()['session_id']
+            # 让首轮正常回答（会写入 citations）
+            first = _ask(client, sid, '张三是谁', docs=[1])
+            assert first['citations'], '首轮应带引用，否则本用例没有意义'
+
+            # 同一条消息再问一次（无澄清）→ 走正常缓存/生成路径，不受幂等护栏影响
+            again = _ask(client, sid, '张三是谁', docs=[1])
+            assert again['answer']
+            assert again.get('cache_channel') != 'clarification_replay'
+        engine.dispose()
+
+    def test_different_clarification_is_not_treated_as_replay(self, tmp_path: Path) -> None:
+        """澄清文本不同 → 是新问题，必须正常处理，不能被幂等护栏吞掉。"""
+        app, engine, _ = _make_app(tmp_path, InMemoryVectorStore())
+        with TestClient(app) as client:
+            sid = client.post('/api/sessions').json()['session_id']
+            body = _ask(client, sid, '张三喜欢谁？')
+            client.post(
+                f'/api/hitl/tasks/{body["hitl_task_id"]}/submit',
+                json={'clarification': '张三是唐僧'},
+            )
+            other = client.post(
+                f'/api/sessions/{sid}/messages',
+                json={
+                    'question': '张三喜欢谁？',
+                    'document_ids': [],
+                    'clarification': '另一个完全不同的补充',
+                },
+            ).json()
+            assert other.get('cache_channel') != 'clarification_replay'
+        engine.dispose()

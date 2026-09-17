@@ -7,7 +7,13 @@ from sqlalchemy.orm import Session
 
 from reading_assistant.api import schemas
 from reading_assistant.api.deps import get_db_session, get_qa_graph
-from reading_assistant.storage import HitlTask, reject_hitl_task, submit_hitl_clarification
+from reading_assistant.storage import (
+    HitlTask,
+    find_answer_for_clarification,
+    get_hitl_task,
+    reject_hitl_task,
+    submit_hitl_clarification,
+)
 from reading_assistant.utils.logger_handler import get_logger
 
 logger = get_logger('api')
@@ -46,6 +52,30 @@ def submit_clarification(
     降级：``task.thread_id`` 为空（加列前的旧任务）或 checkpoint 已丢失时，
     不假装成功 —— ``resumed=False`` 且不带答案，客户端按旧路径重发即可。
     """
+    existing = get_hitl_task(session, task_id)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f'HITL 任务不存在: {task_id}')
+
+    if existing.status == HitlTask.STATUS_APPROVED:
+        # 幂等：重复提交（双击 / 网络重试 / 旧前端）不应再生成一次，
+        # 也不该报错 —— 直接返回上次恢复出的那份回答。
+        prior = find_answer_for_clarification(
+            session, existing.session_id, existing.clarification or payload.clarification
+        )
+        if prior is not None:
+            logger.info('HITL[恢复] 任务已恢复过，幂等返回 task=%s message=%s',
+                        task_id, prior.id)
+            out = schemas.HitlTaskOut.model_validate(existing)
+            return out.model_copy(update={
+                'resumed': True,
+                'answer': prior.content,
+                'citations': [
+                    schemas.CitationOut(**c) if isinstance(c, dict) else c
+                    for c in ((prior.meta or {}).get('citations') or [])
+                ],
+            })
+        raise HTTPException(status_code=400, detail=f'任务已处理: {task_id}')
+
     try:
         task = submit_hitl_clarification(session, task_id, payload.clarification)
     except ValueError as exc:
