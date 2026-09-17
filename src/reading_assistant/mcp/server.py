@@ -21,6 +21,7 @@ from pathlib import Path
 from fastmcp import FastMCP
 
 from reading_assistant.graph import build_ingest_graph, build_qa_graph
+from reading_assistant.mcp.policy import validate_book_path
 from reading_assistant.parsers import get_parser
 from reading_assistant.runtime import (
     get_embedding_model,
@@ -68,16 +69,25 @@ def list_books() -> list[dict]:
 def upload_book(book_path: str) -> dict:
     """上传并入库一本电子书（txt/epub/pdf/docx）。
 
+    安全边界（P3-1）：仅允许读取受信目录内的文件（默认白名单为项目
+    data/uploads 与用户 Downloads/Documents，可用环境变量
+    READINGASSISTANT_MCP_UPLOAD_ROOTS 覆盖），并拒绝 .ssh/密钥/凭证等敏感
+    路径——避免与 ask_book 组合出“任意文件读取”的外泄原语。
+
     Args:
         book_path: 本机书籍文件的绝对路径。重复上传同一本书会返回已有记录。
     """
-    source = Path(book_path)
-    if not source.is_file():
+    raw = Path(book_path).expanduser()
+    # 存在性 / 普通文件判定由本工具负责（policy 只管路径策略）。
+    if not raw.is_file():
         raise ValueError(f'文件不存在: {book_path}')
     try:
-        get_parser(source.name)
+        get_parser(raw.name)
     except Exception as exc:  # noqa: BLE001 —— 统一转成可读的 ValueError
-        raise ValueError(f'不支持的书籍格式: {source.name}') from exc
+        raise ValueError(f'不支持的书籍格式: {raw.name}') from exc
+
+    # 准入闸门：在任何读取 / 复制 / 解析之前执行路径安全策略（白名单 + 黑名单）。
+    source = validate_book_path(book_path)
 
     upload_dir = get_upload_dir()
     upload_dir.mkdir(parents=True, exist_ok=True)
