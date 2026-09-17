@@ -62,6 +62,11 @@ class AskResponse(BaseModel):
     citations: list[CitationOut] = Field(default_factory=list)
     needs_clarification: bool = False
     hitl_task_id: int | None = None
+    # 本次问答的 LangGraph thread —— 图挂起时客户端凭它（或 task_id）恢复
+    thread_id: str | None = None
+    # 该澄清任务能否「断点续答」：True = 提交澄清会从挂起点继续；
+    # False = 降级为重跑（旧记录 / 未配置持久化 checkpoint）
+    resumable: bool = False
     intent: str | None = None  # 检索门分类: book | history | chat(供评测/观测)
     # 缓存来源（供指标看板与前端反馈使用）
     cache_hit: bool = False
@@ -92,8 +97,14 @@ class HitlTaskOut(BaseModel):
     question: str
     status: str
     clarification: str | None = None
+    thread_id: str | None = None
     created_at: datetime
     updated_at: datetime
+    # 下面是「提交澄清即恢复」时一并返回的结果（仅在 submit 响应里有值）
+    resumed: bool = False
+    answer: str | None = None
+    citations: list[CitationOut] = Field(default_factory=list)
+    needs_clarification: bool = False
 
 
 class HitlClarificationRequest(BaseModel):

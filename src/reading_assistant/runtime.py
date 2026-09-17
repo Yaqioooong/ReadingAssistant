@@ -50,6 +50,17 @@ def get_embedding_model():
 
 
 @lru_cache
+def get_checkpointer():
+    """全局检查点后端（测试可覆盖）。
+
+    必须单例：恢复时要能查到挂起时的 checkpoint，换个 saver 就查不到了。
+    """
+    from reading_assistant.graph.checkpointer import create_checkpointer
+
+    return create_checkpointer()
+
+
+@lru_cache
 def get_upload_dir() -> Path:
     """上传文件保存目录。"""
     path = Path(get_abs_path('uploads'))

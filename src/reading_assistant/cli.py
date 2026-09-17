@@ -6,9 +6,14 @@ from uuid import uuid4
 
 import typer
 
-from reading_assistant.graph import build_ingest_graph, build_qa_graph
+from reading_assistant.graph import (
+    build_ingest_graph,
+    build_qa_graph,
+    interrupt_task_id,
+)
 from reading_assistant.model.factory import get_chat_model, get_embedding_model
 from reading_assistant.parsers import ParseError
+from reading_assistant.runtime import get_checkpointer
 from reading_assistant.storage import (
     ChatSession,
     create_db_engine,
@@ -65,6 +70,7 @@ def create_cli(session_factory=None, vector_store=None, llm=None, embedding_mode
             vector_store or create_vector_store(),
             llm=llm or get_chat_model(),
             embedding_model=embedding_model or get_embedding_model(),
+            checkpointer=get_checkpointer(),
         )
         current_session_id = session_id
         if current_session_id is None:
@@ -82,11 +88,15 @@ def create_cli(session_factory=None, vector_store=None, llm=None, embedding_mode
             },
             config={'configurable': {'thread_id': f'qa-cli-{uuid4().hex}'}},
         )
-        if result.get('needs_clarification'):
+        task_id = interrupt_task_id(result)
+        if task_id is not None:
             typer.echo(
-                f'信息不足，已创建澄清任务 #{result["hitl_task_id"]}（awaiting），'
+                f'信息不足，已创建澄清任务 #{task_id}（awaiting），'
                 '请补充细节后重新提问。'
             )
+            return
+        if result.get('needs_clarification'):
+            typer.echo('信息不足，已转入澄清流程（未能定位任务 id）。')
             return
         typer.echo(f'回答：{result.get("answer")}')
         for citation in result.get('citations') or []:

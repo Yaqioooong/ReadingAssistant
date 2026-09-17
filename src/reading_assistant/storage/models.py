@@ -80,6 +80,10 @@ class HitlTask(Base):
     question: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default=STATUS_AWAITING)
     clarification: Mapped[str | None] = mapped_column(Text)
+    # LangGraph 的 thread_id —— **恢复指针**。图在 create_hitl 里挂起时，
+    # 只有这个值能把本次暂停重新接上（进程内靠它查内存 saver，跨进程靠它查 PG）。
+    # 没有它就只能「重跑」，那就是今天的行为。空值 = 不可恢复（旧记录 / 降级路径）。
+    thread_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow

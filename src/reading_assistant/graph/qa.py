@@ -8,9 +8,11 @@ from datetime import datetime, timedelta, timezone
 from typing import TypedDict
 
 from langchain_core.embeddings import Embeddings
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -23,6 +25,7 @@ from reading_assistant.storage import (
     ChatSession,
     create_hitl_task,
     get_document,
+    get_or_create_hitl_task,
     get_qa_cache_entry,
     list_documents,
     list_indexed_document_ids,
@@ -63,6 +66,27 @@ class QAState(TypedDict, total=False):
     cache_similarity: float | None  # 语义/标识符命中时的相似度
     cache_invalidated: bool  # 是否丢弃过"信息不足式"脏缓存
     summary_pending: dict | None  # summarize 增量任务: {upto, anchor, text}
+
+
+def interrupt_payload(result: dict | None) -> dict | None:
+    """取图的挂起载荷；没挂起返回 None。
+
+    ⚠️ 图在 ``interrupt()`` 处挂起时，**该节点的返回值不会写进 state**
+    （``hitl_task_id`` 因此不在 ``result`` 里），指针只能从挂起载荷里取。
+    所有直接 ``invoke`` 图的调用方都必须走这个 helper，否则就会 KeyError
+    —— 这正是 2026-09-17 改造打断的那批调用方。
+    """
+    interrupts = (result or {}).get('__interrupt__') or []
+    if not interrupts:
+        return None
+    value = getattr(interrupts[0], 'value', None)
+    return value if isinstance(value, dict) else None
+
+
+def interrupt_task_id(result: dict | None) -> int | None:
+    """挂起中的 HITL 任务 id（未挂起 → None）。"""
+    payload = interrupt_payload(result)
+    return payload.get('hitl_task_id') if payload else None
 
 
 def _chunk_to_dict(chunk) -> dict:
@@ -580,12 +604,30 @@ def build_qa_graph(
         needs = not state.get('chunks') and not state.get('clarification')
         return {'needs_clarification': needs}
 
-    def create_hitl(state: QAState) -> dict:
-        logger.info('问答[HITL] 信息不足，进入澄清流程 q=%.30s', state['question'])
+    def create_hitl(state: QAState, config: RunnableConfig) -> dict:
+        """信息不足 → 建任务 → **真挂起**（interrupt），等澄清后从断点继续。
+
+        与「重跑」的本质区别：挂起时状态留在 checkpoint 里，恢复时从本节点继续，
+        ``retrieve`` 用的是**本次会话真实的** document_ids / 历史 / 已算好的向量，
+        不需要客户端重发问题、也不会把 gate/context_load/summarize 重付一遍。
+
+        ⚠️ ``interrupt()`` 恢复时**本节点从头重跑**（LangGraph 用重放重建入口状态），
+        所以 ``interrupt()`` 之前的一切副作用都必须幂等 —— 见
+        ``get_or_create_hitl_task``（按 thread_id 取或建）。
+        """
+        thread_id = (config or {}).get('configurable', {}).get('thread_id')
+        logger.info('问答[HITL] 信息不足，进入澄清流程 q=%.30s thread=%.24s',
+                    state['question'], thread_id or '(无)')
         with session_scope(session_factory) as session:
-            task = create_hitl_task(
-                session, session_id=state.get('session_id'), question=state['question']
-            )
+            if thread_id:
+                task = get_or_create_hitl_task(
+                    session, state.get('session_id'), state['question'], thread_id
+                )
+            else:
+                # 没有 thread_id 就没法恢复 → 不挂起，退回旧行为（建任务后结束本轮）
+                task = create_hitl_task(
+                    session, session_id=state.get('session_id'), question=state['question']
+                )
             settings = get_settings()
             # ⚠️ 退化环境下（目标文档没入库完成）的「答不了」不写缓存：
             # 那不是关于书内容的结论，而是关于系统状态的结论，修好索引后必然过期。
@@ -616,7 +658,31 @@ def build_qa_graph(
                     cached_chunk_count=len(state.get('chunks') or []),
                 )
                 prune_qa_cache(session, settings.cache_max_entries)
-            return {'hitl_task_id': task.id}
+            task_id = task.id
+
+        if not thread_id or state.get('clarification'):
+            # 无 thread_id（不可恢复）或澄清已用尽（防再次挂起成死循环）→ 正常结束本轮
+            return {'hitl_task_id': task_id}
+        # 挂起。载荷把 task_id 带出去 —— 节点被中断时它的返回值不会写进 state，
+        # 所以 API 层只能从挂起载荷里拿这个指针（或回查 DB）。
+        clarification = interrupt({'hitl_task_id': task_id, 'question': state['question']})
+        logger.info('问答[HITL] 收到澄清，从断点继续 thread=%.24s', thread_id)
+        # 澄清是用户的一次独立发言，记进历史（本段只在恢复时执行一次：
+        # 任务要能被 approved 必须先处于 awaiting，重复提交会被拒）
+        if state.get('session_id') and clarification:
+            with session_scope(session_factory) as session:
+                session.add(
+                    ChatMessage(
+                        session_id=state['session_id'],
+                        role='user',
+                        content=f'补充说明：{clarification}',
+                    )
+                )
+        return {
+            'hitl_task_id': task_id,
+            'clarification': clarification,
+            'needs_clarification': False,
+        }
 
     def answer(state: QAState) -> dict:
         import time
@@ -708,15 +774,29 @@ def build_qa_graph(
                 prune_qa_cache(session, settings.cache_max_entries)
         return {'answer': content, 'citations': citations}
 
+    def record_question(state: QAState) -> dict:
+        """轮次开头即记下用户的问题（**不能**等到 record 才写）。
+
+        为什么必须提前：真挂起后 ``record`` 在本轮不会执行（图停在 create_hitl），
+        问题就会**丢失** —— 用户放弃澄清时历史里查无此问，下一轮问「刚才我问了什么」
+        会得到错误答案。今天之所以没这个问题，是因为旧流程「挂起」其实跑到了 END。
+        """
+        if not state.get('session_id'):
+            return {}
+        with session_scope(session_factory) as session:
+            session.add(
+                ChatMessage(
+                    session_id=state['session_id'],
+                    role='user',
+                    content=state['question'],
+                )
+            )
+        return {}
+
     def record(state: QAState) -> dict:
         if not state.get('session_id'):
             return {}
         with session_scope(session_factory) as session:
-            # 有澄清补充时，记录完整问题（与检索实际使用的文本一致，_full_question_text）
-            user_content = _full_question_text(state['question'], state.get('clarification'))
-            session.add(
-                ChatMessage(session_id=state['session_id'], role='user', content=user_content)
-            )
             if state.get('answer'):
                 session.add(
                     ChatMessage(
@@ -742,6 +822,14 @@ def build_qa_graph(
 
     def route_after_answer(state: QAState) -> str:
         return 'create_hitl' if state.get('needs_clarification') else 'record'
+
+    def route_after_create_hitl(state: QAState) -> str:
+        """恢复后带澄清说明回到检索重跑；未挂起（不可恢复 / 澄清已用尽）则收尾。
+
+        ⚠️ 恢复路径**刻意跳过 cache_check**：本轮是同一个 thread 的续跑，
+        而缓存里那条正是上次「答不了」的判定，再去查一遍只会把它捞回来。
+        """
+        return 'retrieve' if state.get('clarification') else 'record'
 
 
     def context_load(state: QAState) -> dict:
@@ -896,12 +984,14 @@ def build_qa_graph(
     graph.add_node('create_hitl', create_hitl)
     graph.add_node('answer', answer)
     graph.add_node('record', record)
+    graph.add_node('record_question', record_question)
     graph.add_node('context_load', context_load)
     graph.add_node('summarize', summarize)
     graph.add_node('gate', gate)
     graph.add_node('context_answer', context_answer)
     graph.add_edge(START, 'context_load')
-    graph.add_edge('context_load', 'summarize')
+    graph.add_edge('context_load', 'record_question')
+    graph.add_edge('record_question', 'summarize')
     graph.add_edge('summarize', 'gate')
     graph.add_conditional_edges(
         'gate',
@@ -925,7 +1015,11 @@ def build_qa_graph(
         route_after_answer,
         {'create_hitl': 'create_hitl', 'record': 'record'},
     )
-    graph.add_edge('create_hitl', 'record')
+    graph.add_conditional_edges(
+        'create_hitl',
+        route_after_create_hitl,
+        {'retrieve': 'retrieve', 'record': 'record'},
+    )
     graph.add_edge('record', END)
     return graph.compile(checkpointer=checkpointer or InMemorySaver())
 if __name__ == '__main__':

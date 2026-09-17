@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     chroma_collection_name: str = _chroma_cfg.get('collection_name', 'reading_agent_chunks')
     chroma_persist_dir: str = _chroma_cfg.get('persist_directory', 'rag/chroma_db')
     vector_store_backend: str = 'chroma'
+    # LangGraph checkpoint 后端：'memory'（进程内，仅单进程/测试可恢复）
+    # 或 'postgres'（跨进程/跨重启可恢复，生产必须用这个）。
+    # 设 memory 时「中断-恢复」只在同一进程内有效。
+    checkpoint_backend: str = 'memory'
     top_k: int = int(_chroma_cfg.get('k', 6))
     retrieval_min_score: float = float(_chroma_cfg.get('min_score', 0.45))
     # 检索模式：'vector'（纯稠密，默认）| 'hybrid'（BM25 + 稠密 + RRF 融合）

@@ -52,6 +52,7 @@ def create_app(
     llm=None,
     embedding_model=None,
     upload_dir: Path | None = None,
+    checkpointer=None,
 ) -> FastAPI:
     """创建 FastAPI 应用；不传参时使用生产组件。"""
     import time
@@ -64,8 +65,15 @@ def create_app(
             init_db(create_db_engine())
             _reconcile_index_status_on_startup()
         logger.info('ReadingAssistant API 启动')
-        yield
-        logger.info('ReadingAssistant API 关闭')
+        try:
+            yield
+        finally:
+            # ⚠️ 这里**刻意不关** checkpointer 的连接池。
+            # 默认 saver 是 runtime 层的进程级单例（生产需要 —— 同进程内多个 app
+            # 也要能查到彼此的挂起断点）。谁把它关掉，后面所有 app 再拿到这个
+            # 缓存对象就会 PoolClosed 直接报错（实测会让 40+ 个用例挂掉）。
+            # 关池交给 create_postgres_checkpointer 注册的 atexit 兜底。
+            logger.info('ReadingAssistant API 关闭')
     from reading_assistant.api.routes import experiments, feedback, settings, stats
 
     app = FastAPI(title='ReadingAssistant API', version='0.1.0', lifespan=lifespan)
@@ -89,6 +97,11 @@ def create_app(
         app.dependency_overrides[get_embedding_model] = lambda: embedding_model
     if upload_dir is not None:
         app.dependency_overrides[get_upload_dir] = lambda: upload_dir
+    if checkpointer is not None:
+        # 测试隔离：默认 checkpointer 是进程级单例（生产需要 —— 同一进程内跨 app
+        # 也要能查到挂起的 checkpoint），但测试里会让各 app 的 checkpoint 串味。
+        # 显式注入即各用各的。
+        app.state.checkpointer = checkpointer
 
     app.include_router(documents.router)
     app.include_router(sessions.router)

@@ -9,20 +9,19 @@ from sqlalchemy.orm import Session
 from reading_assistant.api import schemas
 from reading_assistant.api.deps import (
     get_db_session,
-    get_embedding_model,
-    get_llm,
+    get_qa_graph,
     get_session_factory,
-    get_vector_store,
 )
-from reading_assistant.graph import build_qa_graph
+from reading_assistant.graph import interrupt_payload
+from reading_assistant.graph.checkpointer import discard_thread_if_finished
 from reading_assistant.storage import (
     ChatMessage,
     ChatSession,
+    HitlTask,
     QaRequestEvent,
     delete_session,
     session_scope,
 )
-from reading_assistant.storage.vector_store import VectorStore
 from reading_assistant.utils.logger_handler import get_logger
 
 logger = get_logger('api')
@@ -109,11 +108,24 @@ def get_messages(session_id: int, session: Session = Depends(get_db_session)):
 def delete_chat_session(
     session_id: int,
     session: Session = Depends(get_db_session),
+    graph=Depends(get_qa_graph),
 ) -> None:
-    """删除会话及其全部消息与 HITL 任务。"""
+    """删除会话及其全部消息与 HITL 任务（连带回收挂起的断点）。"""
+    # 会话没了，它下面挂起的那些断点也永远不会被恢复 → 一并作废
+    thread_ids = [
+        t for t in session.scalars(
+            select(HitlTask.thread_id).where(HitlTask.session_id == session_id)
+        ) if t
+    ]
     if not delete_session(session, session_id):
         logger.warning('删除会话失败，会话不存在 session_id=%s', session_id)
         raise HTTPException(status_code=404, detail=f'会话不存在: {session_id}')
+    saver = getattr(graph, 'checkpointer', None)
+    if saver is not None and hasattr(saver, 'delete_thread'):
+        for thread_id in thread_ids:
+            saver.delete_thread(thread_id)
+        if thread_ids:
+            logger.info('删除会话 session_id=%s，作废断点 %d 个', session_id, len(thread_ids))
     logger.info('删除会话 session_id=%s', session_id)
 
 
@@ -122,12 +134,11 @@ def ask_question(
     session_id: int,
     payload: schemas.AskRequest,
     session_factory=Depends(get_session_factory),
-    vector_store: VectorStore = Depends(get_vector_store),
-    llm=Depends(get_llm),
-    embedding_model=Depends(get_embedding_model),
+    # 图由 app 级单例提供（见 deps.get_qa_graph）—— 恢复必须复用同一张图/saver
+    graph=Depends(get_qa_graph),
     session: Session = Depends(get_db_session),
 ):
-    """提问：运行问答流水线并记录消息；信息不足时创建 HITL 任务。"""
+    """提问：运行问答流水线并记录消息；信息不足时**挂起**（可断点续答）。"""
     import time
 
     _ensure_session(session, session_id)
@@ -137,12 +148,6 @@ def ask_question(
     document_id = doc_ids[0] if len(doc_ids) == 1 else None
     logger.info('提问 session_id=%s docs=%s q=%.40s', session_id, doc_ids, payload.question)
     start = time.perf_counter()
-    graph = build_qa_graph(
-        session_factory,
-        vector_store,
-        llm=llm,
-        embedding_model=embedding_model,
-    )
     invoke_state: dict = {
         'question': payload.question,
         'session_id': session_id,
@@ -151,11 +156,40 @@ def ask_question(
     }
     if len(doc_ids) > 1:
         invoke_state['document_ids'] = doc_ids
+    thread_id = f'qa-{uuid4().hex}'
     result = graph.invoke(
         invoke_state,
-        config={'configurable': {'thread_id': f'qa-{uuid4().hex}'}},
+        config={'configurable': {'thread_id': thread_id}},
     )
     cost_ms = (time.perf_counter() - start) * 1000
+    # 图在 create_hitl 处挂起：节点返回值不会进 state（中断时被丢弃），
+    # 所以 task_id 只能从**挂起载荷**里取 —— 见 qa.create_hitl 的 interrupt(payload)
+    pending = interrupt_payload(result)
+    if pending is not None:
+        logger.info('提问挂起等待澄清 session_id=%s thread=%s task=%s',
+                    session_id, thread_id, pending.get('hitl_task_id'))
+        _record_cache_event(
+            session_factory,
+            session_id=session_id,
+            question=payload.question,
+            intent=result.get('intent'),
+            cache_hit=bool(result.get('cache_hit')),
+            cache_channel=result.get('cache_channel'),
+            cache_similarity=result.get('cache_similarity'),
+            cache_invalidated=bool(result.get('cache_invalidated')),
+            latency_ms=int(cost_ms),
+        )
+        return schemas.AskResponse(
+            needs_clarification=True,
+            hitl_task_id=pending.get('hitl_task_id'),
+            resumable=bool(pending.get('hitl_task_id')),
+            thread_id=thread_id,
+            intent=result.get('intent'),
+            cache_hit=bool(result.get('cache_hit')),
+            cache_channel=result.get('cache_channel'),
+        )
+    # 跑完就没必要留着 checkpoint（挂起中的才要留）
+    discard_thread_if_finished(graph, thread_id)
     # 闲聊/历史类轮次走 context_answer，不经 cache_check → 归为 skipped
     # （与 disabled 区分：disabled 是多文档或缓存开关关闭，skipped 是本就不适用缓存）
     skipped = result.get('intent') in ('chat', 'history')
@@ -179,6 +213,7 @@ def ask_question(
         citations=result.get('citations') or [],
         needs_clarification=result.get('needs_clarification', False),
         hitl_task_id=result.get('hitl_task_id'),
+        thread_id=thread_id,
         intent=result.get('intent'),
         cache_hit=bool(result.get('cache_hit')),
         cache_channel=channel,

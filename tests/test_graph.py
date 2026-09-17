@@ -7,7 +7,11 @@ import pytest
 from langchain_core.embeddings import Embeddings
 from sqlalchemy import select
 
-from reading_assistant.graph import build_ingest_graph, build_qa_graph
+from reading_assistant.graph import (
+    build_ingest_graph,
+    build_qa_graph,
+    interrupt_payload,
+)
 from reading_assistant.storage import (
     ChatMessage,
     ChatSession,
@@ -249,13 +253,19 @@ class TestQaGraph:
             config={'configurable': {'thread_id': 'qa-2'}},
         )
 
-        assert result['needs_clarification'] is True
-        assert result['hitl_task_id'] is not None
+        # 真挂起后：节点返回值不进 state，任务 id 只能从挂起载荷里取
+        payload = interrupt_payload(result)
+        assert payload is not None, '图应在 create_hitl 处挂起'
         assert result.get('answer') is None
-        task = session.get(HitlTask, result['hitl_task_id'])
+        task_id = payload['hitl_task_id']
+        task = session.get(HitlTask, task_id)
         assert task.status == HitlTask.STATUS_AWAITING
+        # 恢复指针必须落库，否则重启/换进程后就接不上了
+        assert task.thread_id == 'qa-2'
+        # 用户的问题在**轮次开头**就记下了（挂起时 record 不会执行）
         messages = session.scalars(select(ChatMessage).order_by(ChatMessage.id)).all()
         assert [message.role for message in messages] == ['user']
+        assert '没有检索结果的提问' in messages[0].content
 
     def test_resume_with_clarification_answers(self, session_factory) -> None:
         graph = build_qa_graph(
@@ -273,6 +283,72 @@ class TestQaGraph:
         assert result['needs_clarification'] is False
         assert result['answer'] == '补充后的回答。'
         assert result.get('hitl_task_id') is None
+
+    def test_resume_from_interrupt_continues_not_restarts(self, session_factory) -> None:
+        """真中断-恢复：从挂起点继续，而不是带着 clarification 从头重跑。
+
+        这是本项目的核心契约之一。与“重跑”的可观测差异：
+        - 恢复时不需要客户端重发问题，图自带原来的 document_ids / 历史；
+        - ``record`` 只在恢复后执行一次（挂起时不会写 assistant 消息）；
+        - 恢复后回到 retrieve 重检索，而不是重跑 gate/context_load/summarize。
+        """
+        from langgraph.types import Command
+
+        from reading_assistant.graph import interrupt_task_id
+
+        with session_factory() as seed:
+            seed.add(
+                Document(
+                    filename='book.txt',
+                    title='book',
+                    file_hash='f1',
+                    content_hash='c1',
+                    index_status='indexed',
+                )
+            )
+            seed.commit()
+
+        graph = build_qa_graph(
+            session_factory,
+            InMemoryVectorStore(),          # 空库 → 无片段 → 判「信息不足」
+            llm=FakeLLM('恢复后的回答。'),
+            embedding_model=FakeEmbeddings([1.0, 0.0]),
+        )
+        config = {'configurable': {'thread_id': 'qa-resume-1'}}
+        first = graph.invoke({'question': '书里没有的东西？', 'session_id': None}, config=config)
+
+        task_id = interrupt_task_id(first)
+        assert task_id is not None
+        # 挂起中：state 停在 create_hitl，还有待执行节点
+        assert graph.get_state(config).next, '挂起时应有待执行节点'
+
+        second = graph.invoke(Command(resume='我说的是第三章'), config=config)
+
+        assert second.get('answer') == '恢复后的回答。'
+        assert second['needs_clarification'] is False
+        # 恢复后跑到 END，不再挂起
+        assert not graph.get_state(config).next
+
+    def test_interrupt_is_not_reissued_after_clarification(self, session_factory) -> None:
+        """澄清已用过之后再判信息不足，不得再次挂起（否则构成死循环）。"""
+        from langgraph.types import Command
+
+        from reading_assistant.graph import interrupt_task_id
+
+        graph = build_qa_graph(
+            session_factory,
+            InMemoryVectorStore(),
+            llm=FakeLLM('仍然不足。'),
+            embedding_model=FakeEmbeddings([1.0, 0.0]),
+        )
+        config = {'configurable': {'thread_id': 'qa-resume-2'}}
+        first = graph.invoke({'question': 'q', 'session_id': None}, config=config)
+        assert interrupt_task_id(first) is not None
+
+        second = graph.invoke(Command(resume='补充'), config=config)
+        # 关键：第二遍不得再挂起
+        assert interrupt_task_id(second) is None
+        assert not graph.get_state(config).next
 
 
 class TestHitlTransitions:

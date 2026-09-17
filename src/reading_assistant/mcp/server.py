@@ -20,10 +20,15 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
-from reading_assistant.graph import build_ingest_graph, build_qa_graph
+from reading_assistant.graph import (
+    build_ingest_graph,
+    build_qa_graph,
+    interrupt_task_id,
+)
 from reading_assistant.mcp.policy import validate_book_path
 from reading_assistant.parsers import get_parser
 from reading_assistant.runtime import (
+    get_checkpointer,
     get_embedding_model,
     get_llm,
     get_session_factory,
@@ -131,6 +136,7 @@ def ask_book(
         get_vector_store(),
         llm=get_llm(),
         embedding_model=get_embedding_model(),
+        checkpointer=get_checkpointer(),
     )
     state: dict = {
         'question': question,
@@ -151,7 +157,7 @@ def ask_book(
         'answer': result.get('answer'),
         'citations': result.get('citations') or [],
         'needs_clarification': result.get('needs_clarification', False),
-        'hitl_task_id': result.get('hitl_task_id'),
+        'hitl_task_id': interrupt_task_id(result),
     }
 
 

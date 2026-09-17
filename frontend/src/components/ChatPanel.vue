@@ -196,13 +196,34 @@ async function submitClarify() {
   if (!pending || !extra || clarificationBusy.value) return
   clarificationBusy.value = true
   try {
-    if (pending.taskId) await submitClarification(pending.taskId, extra)
+    // 服务端从断点继续（Command(resume=...)），直接把答案带回；
+    // 只有服务端明确降级（resumed=false，例如旧任务或 checkpoint 已丢失）
+    // 才回退到「带着补充说明重发原问题」的老路径。
+    const submitted = pending.taskId ? await submitClarification(pending.taskId, extra) : null
     pendingClarification.value = null
     clarificationText.value = ''
-    // 与服务端 record 的存储格式保持一致（原问题 + 补充说明）
-    messages.value.push({ role: 'user', content: `${pending.question}\n补充说明：${extra}` })
-    sending.value = true
+    messages.value.push({ role: 'user', content: `补充说明：${extra}` })
     scrollToBottom()
+
+    if (submitted && submitted.resumed) {
+      messages.value.push({
+        role: 'assistant',
+        content: submitted.answer || '',
+        citations: submitted.citations || [],
+        feedback: null,
+        feedbackBusy: false,
+      })
+      if (submitted.needs_clarification) {
+        messages.value.push({
+          role: 'system',
+          content: '补充后信息仍然不足，请再补充章节、人物或具体情节。',
+        })
+      }
+      await reloadHistory()
+      return
+    }
+
+    sending.value = true
     await runQuestion(pending.question, extra)
     await reloadHistory()
   } catch (err) {

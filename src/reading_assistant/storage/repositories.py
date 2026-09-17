@@ -61,16 +61,45 @@ def insert_document(session: Session, **fields) -> tuple[Document, bool]:
         return existing, False
 
 
-def create_hitl_task(session: Session, session_id: int | None, question: str) -> HitlTask:
+def create_hitl_task(
+    session: Session,
+    session_id: int | None,
+    question: str,
+    thread_id: str | None = None,
+) -> HitlTask:
     """创建 HITL 澄清任务（awaiting）。"""
     task = HitlTask(
         session_id=session_id,
         question=question,
         status=HitlTask.STATUS_AWAITING,
+        thread_id=thread_id,
     )
     session.add(task)
     session.flush()
     return task
+
+
+def get_or_create_hitl_task(
+    session: Session,
+    session_id: int | None,
+    question: str,
+    thread_id: str,
+) -> HitlTask:
+    """按 ``thread_id`` 幂等取/建 HITL 任务。
+
+    ⚠️ 必须幂等：``interrupt()`` 恢复时**节点会从头重跑**，节点里 ``interrupt()``
+    之前的所有副作用都会再执行一遍 —— 不幂等就会每恢复一次多出一条任务。
+    （这与「图执行是重放式」有关：LangGraph 用重放来重建节点入口状态。）
+    """
+    existing = session.scalar(select(HitlTask).where(HitlTask.thread_id == thread_id))
+    if existing is not None:
+        return existing
+    return create_hitl_task(session, session_id, question, thread_id=thread_id)
+
+
+def get_hitl_task_by_thread(session: Session, thread_id: str) -> HitlTask | None:
+    """按 ``thread_id`` 反查任务 —— 图挂起后 API 层凭它把响应补全。"""
+    return session.scalar(select(HitlTask).where(HitlTask.thread_id == thread_id))
 
 
 def get_hitl_task(session: Session, task_id: int) -> HitlTask | None:

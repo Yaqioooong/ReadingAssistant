@@ -50,6 +50,12 @@ def init_db(engine: Engine) -> None:
         column='cached_chunk_count',
         ddl='ALTER TABLE qa_cache ADD COLUMN cached_chunk_count INTEGER NOT NULL DEFAULT 0',
     )
+    _ensure_column(
+        engine,
+        table='hitl_tasks',
+        column='thread_id',
+        ddl='ALTER TABLE hitl_tasks ADD COLUMN thread_id VARCHAR(64)',
+    )
 
 
 def _ensure_column(engine: Engine, table: str, column: str, ddl: str) -> None:
