@@ -208,6 +208,28 @@ def run(
     n_cited = sum(1 for r in answerable if r['citations'] > 0)
     avg_latency = sum(r['latency_ms'] for r in results) / len(results) if results else 0
 
+    # 生成层规则指标（附加口径，原字段一律不变）
+    from eval.metrics import abstention_metrics, answer_relevancy
+
+    _records = [
+        {
+            'expect_unanswerable': bool(
+                (cases[index] if index < len(cases) else {}).get('expect_unanswerable')
+            ),
+            'answer': r.get('answer', ''),
+        }
+        for index, r in enumerate(results)
+    ]
+    _abstention = abstention_metrics(_records)
+    _relevancy_scores = [
+        answer_relevancy(r.get('question', ''), r.get('answer', '')) for r in results
+    ]
+    _avg_relevancy = (
+        round(sum(_relevancy_scores) / len(_relevancy_scores), 4)
+        if _relevancy_scores
+        else None
+    )
+
     summary = {
         'mode': mode,
         'total': len(results),
@@ -219,6 +241,10 @@ def run(
         'unanswerable_recognition': round(n_unans_pass / len(unans), 3) if unans else None,
         'citation_coverage': round(n_cited / len(answerable), 3) if answerable else None,
         'avg_latency_ms': round(avg_latency),
+        'abstention_rate': _abstention['abstention_rate'],
+        'false_refusal_rate': _abstention['false_refusal_rate'],
+        'hallucination_rate': _abstention['hallucination_rate'],
+        'answer_relevancy': _avg_relevancy,
     }
     print('\n=== 汇总 ===')
     for k, v in summary.items():
