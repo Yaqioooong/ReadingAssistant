@@ -91,6 +91,11 @@ class Settings(BaseSettings):
     cache_max_entries: int = 10000  # 最大缓存键数
     cache_similarity_threshold: float = 0.95
 
+    # --- 意图识别级联（规则 → 向量原型 → LLM，见 graph/intent.py）---
+    intent_rules_enabled: bool = True  # L1 规则快通道（高精度，命中即省一次 LLM）
+    intent_prototype_threshold: float = 0.75  # L2 原型层置信阈值；<=0 停用该层
+    intent_prototype_margin: float = 0.08  # L2 判 book 需领先 chat/history 的最小幅度
+
     @property
     def chroma_persist_path(self) -> Path:
         """向量库持久化目录（仓库根目录下）。"""

@@ -205,6 +205,8 @@ def ask_question(
             resumable=bool(pending.get('hitl_task_id')),
             thread_id=thread_id,
             intent=result.get('intent'),
+            intent_channel=result.get('intent_channel'),
+            intent_score=result.get('intent_score'),
             cache_hit=bool(result.get('cache_hit')),
             cache_channel=result.get('cache_channel'),
         )
@@ -235,6 +237,8 @@ def ask_question(
         hitl_task_id=result.get('hitl_task_id'),
         thread_id=thread_id,
         intent=result.get('intent'),
+        intent_channel=result.get('intent_channel'),
+        intent_score=result.get('intent_score'),
         cache_hit=bool(result.get('cache_hit')),
         cache_channel=channel,
         cache_similarity=result.get('cache_similarity'),

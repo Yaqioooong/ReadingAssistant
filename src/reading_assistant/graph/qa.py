@@ -17,12 +17,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from reading_assistant.config import get_settings
+from reading_assistant.graph.intent import build_prototype_router, route_fast
 from reading_assistant.model.factory import get_chat_model, get_embedding_model
 from reading_assistant.rag import create_retriever
 from reading_assistant.rag.retriever import _identifier_tokens
 from reading_assistant.storage import (
     ChatMessage,
     ChatSession,
+    Document,
     create_hitl_task,
     get_document,
     get_or_create_hitl_task,
@@ -41,6 +43,7 @@ from reading_assistant.storage.vector_store import VectorStore
 from reading_assistant.utils.logger_handler import get_logger
 
 logger = get_logger('qa')
+
 
 class QAState(TypedDict, total=False):
     """问答图的共享状态。"""
@@ -66,6 +69,9 @@ class QAState(TypedDict, total=False):
     cache_similarity: float | None  # 语义/标识符命中时的相似度
     cache_invalidated: bool  # 是否丢弃过"信息不足式"脏缓存
     summary_pending: dict | None  # summarize 增量任务: {upto, anchor, text}
+    intent_channel: str | None  # 意图判定通道: rule | prototype | llm(供观测/评测)
+    intent_score: float | None  # L2 原型判定时的余弦分(仅观测)
+    intent_embedding: list[float] | None  # L2 算出的问题向量, 供 cache_check 复用免重复 embedding
 
 
 def interrupt_payload(result: dict | None) -> dict | None:
@@ -151,7 +157,6 @@ def _build_answer_prompt(
     return '\n\n'.join(lines)
 
 
-
 # ---- 多轮上下文：历史渲染 / 检索门 / 非检索作答 ----
 HISTORY_TURNS = 6  # 读回的最近消息条数（user+assistant 合计）
 _RENDER_MSG_CAP = 240  # 单条历史渲染上限，控制 prompt 长度
@@ -168,8 +173,8 @@ def _render_history(history: list[dict] | None, cap: int = _RENDER_MSG_CAP) -> s
         if len(content) > cap:
             content = content[:cap] + '…'
         lines.append(f'{role}：{content}')
+    logger.info('rendered history:%s', lines)
     return '\n'.join(lines)
-
 
 
 def _load_summary(session: Session, sid: int) -> dict | None:
@@ -216,12 +221,14 @@ def _build_gate_prompt(
     """检索门 prompt：只让模型输出一个意图词，决定本轮是否检索书籍。"""
     parts = [
         '意图分类任务：判断下面这条用户提问是否需要检索书籍内容，只输出一个词：',
-        '- history：用户在查询“我问过/说过什么”这类会话记录本身'
+        '- history：用户在查询“我问过/说过什么”这类**会话记录本身**'
         '（如“我上一个问题是什么”“我前面问过哪些问题”），答案就在对话记录里',
         '- chat：问候/寒暄/感谢等不涉及书籍内容的闲聊（如“你好”“hello”“谢谢”）',
         '- book：其他一切，包括承接上文继续追问书籍内容'
-        '（如“刚才说的那个计划执行者是谁”“上一条回答展开讲讲”）——'
-        '提到“刚才/上一条”并不等于 history，只有查询对话记录本身才算',
+        '（如“刚才说的那个计划执行者是谁”“我上一个问题里问的那个人是谁”）——'
+        '出现“我上一个问题／上一条／刚才”字样**不等于** history：'
+        '问“记录本身”（我上一个问题是什么）才是 history，'
+        '问“记录里提到的书内容”（我上一个问题里问的那个人是谁）仍是 book',
         '',
     ]
     if history:
@@ -321,10 +328,35 @@ def _is_cache_expired(entry, ttl_days: int) -> bool:
     return datetime.now(timezone.utc) - created > timedelta(days=ttl_days)
 
 
+def _corpus_fingerprint(session: Session) -> str:
+    """全库问答的「语料版本」指纹：**已入库**文档 (id, content_hash) 集合的哈希。
+
+    为什么需要它：全库路径原先写死空串，于是这些缓存条目**没有语料版本维度** ——
+    上传 / 删除 / 重索引任何一本书之后，旧答案照样命中。最坏的形态是
+    **全库拒答被长期缓存**：某本书还没入库时问它 → 「原文没提到」写进缓存 →
+    书入库完成后重问，仍然答「没提到」（缓存 TTL 30 天）。
+    全库问答是主力用法，而语料变化在本项目里很频繁（重复上传、重索引都会改状态）。
+
+    只统计 ``index_status == 'indexed'``：检索层同样只认这批文档
+    （``list_indexed_document_ids``），所以「库里有没有这本书」与「这次回答可不可信」
+    用的是同一个信号，不会各自漂移。排序保证指纹稳定可复现。
+    """
+    rows = session.execute(
+        select(Document.id, Document.content_hash)
+        .where(Document.index_status == 'indexed')
+        .order_by(Document.id)
+    ).all()
+    return sha256_hex('|'.join(f'{doc_id}:{content_hash}' for doc_id, content_hash in rows))
+
+
 def _document_content_hash(session: Session, document_id: int | None) -> str:
-    """取文档版本hash, 全库问答(无document_id)时返回空串"""
+    """取本次问答的「文档版本」维度：单书=该文档 content_hash；全库=语料指纹。
+
+    两者都参与缓存键（见 ``QaCacheEntry`` 的复合唯一索引），语义统一为
+    「这条答案是从哪一版原文推出来的」。
+    """
     if document_id is None:
-        return ''
+        return _corpus_fingerprint(session)
     document = get_document(session, document_id)
     return document.content_hash if document else ''
 
@@ -370,10 +402,7 @@ def _used_citation_indexes(content: str | None, total: int) -> list[int]:
     return used
 
 
-
-def _renumber_citations(
-    content: str | None, citations: list[dict]
-) -> tuple[str, list[dict]]:
+def _renumber_citations(content: str | None, citations: list[dict]) -> tuple[str, list[dict]]:
     """把引用编号重排为连续的 1..n，并同步改写回答里的 [n] 标记。
 
     只重写出现在引用列表中的编号，其余标记原样保留；一次正则替换完成，
@@ -390,16 +419,10 @@ def _renumber_citations(
         return content, citations  # 已是连续编号，无需改动
 
     new_content = _CITATION_MARK.sub(
-        lambda m: (
-            f'[{mapping[int(m.group(1))]}]'
-            if int(m.group(1)) in mapping
-            else m.group(0)
-        ),
+        lambda m: f'[{mapping[int(m.group(1))]}]' if int(m.group(1)) in mapping else m.group(0),
         content,
     )
-    new_citations = [
-        {**c, 'index': mapping.get(c.get('index'), c.get('index'))} for c in citations
-    ]
+    new_citations = [{**c, 'index': mapping.get(c.get('index'), c.get('index'))} for c in citations]
     return new_content, new_citations
 
 
@@ -412,14 +435,20 @@ def build_qa_graph(
 ):
     """构建问答图。
 
-    ``llm`` 与 ``embedding_model`` 可注入（测试用 mock）；缺省使用配置的真实模型。
+    ``llm`` 与 ``embedding_model``
     """
     chat_model = llm or get_chat_model()
-    retriever = create_retriever(vector_store, embedding_model or get_embedding_model())
+    embedding = embedding_model or get_embedding_model()
+    retriever = create_retriever(vector_store, embedding)
+    # 意图识别 L2 层：原型向量在图构建时算一次（图/app 是单例，不会每请求重算）
+    _embed_documents = getattr(embedding, 'embed_documents', None)
+    prototype_router = (
+        build_prototype_router(_embed_documents) if _embed_documents else None
+    )
 
     def cache_check(state: QAState) -> dict:
         if len(state.get('document_ids') or []) > 1:
-            # 多文档问答缓存键需绑定全部文档版本，MVP 直接跳过缓存（每次实时检索）
+            # 多文档问答缓存键需绑定全部文档版本
             return {'cache_hit': False, 'question_hash': None, 'cache_channel': 'disabled'}
         settings = get_settings()
         if not settings.cache_enabled:
@@ -438,9 +467,18 @@ def build_qa_graph(
             if entry is None:
                 # 精确未命中 -> 语义层：同文档内余弦相似度匹配
                 if settings.cache_similarity_threshold > 0:
-                    embedding = retriever.embed(
-                        _full_question_text(state['question'], state.get('clarification')),
+                    # 复用 gate(L2 原型层) 已经算过的问题向量，省一次 embedding。
+                    # ⚠️ 带 clarification 时不能复用：cache_check 要嵌的是
+                    # question + 补充说明，与 L2 嵌的裸 question 不是一个向量。
+                    embedding = (
+                        state.get('intent_embedding')
+                        if not state.get('clarification')
+                        else None
                     )
+                    if embedding is None:
+                        embedding = retriever.embed(
+                            _full_question_text(state['question'], state.get('clarification')),
+                        )
                     best_entry, best_score = None, 0.0
                     id_entry, id_score = None, 0.0
                     for cand in list_qa_cache_entries(session, content_hash, doc_id):
@@ -468,8 +506,11 @@ def build_qa_graph(
                     if satisfied:
                         if _is_cache_expired(best_entry, settings.cache_ttl_days):
                             session.delete(best_entry)
-                            logger.info('问答[缓存] 语义候选已过期丢弃 channel=%s q=%.30s',
-                                        channel, state['question'])
+                            logger.info(
+                                '问答[缓存] 语义候选已过期丢弃 channel=%s q=%.30s',
+                                channel,
+                                state['question'],
+                            )
                             return {
                                 'cache_hit': False,
                                 'question_hash': question_hash,
@@ -478,8 +519,12 @@ def build_qa_graph(
                             }
                         if _is_stale_refusal(best_entry, state):
                             # 环境性失败期间写入的「答不了」，环境已恢复 → 删除并重新回答
-                            logger.warning('问答[缓存] 丢弃陈旧拒答缓存 id=%s channel=%s q=%.30s',
-                                           best_entry.id, channel, state['question'])
+                            logger.warning(
+                                '问答[缓存] 丢弃陈旧拒答缓存 id=%s channel=%s q=%.30s',
+                                best_entry.id,
+                                channel,
+                                state['question'],
+                            )
                             session.delete(best_entry)
                             return {
                                 'cache_hit': False,
@@ -494,8 +539,12 @@ def build_qa_graph(
                         answer = best_entry.answer
                         citations = list(best_entry.citations or [])
                         needs_clarification = best_entry.needs_clarification
-                        logger.info('问答[缓存] %s命中 score=%.4f q=%.30s',
-                                    channel, best_score, state['question'])
+                        logger.info(
+                            '问答[缓存] %s命中 score=%.4f q=%.30s',
+                            channel,
+                            best_score,
+                            state['question'],
+                        )
                         return {
                             'cache_hit': True,
                             'question_hash': question_hash,
@@ -513,20 +562,25 @@ def build_qa_graph(
                         'cache_channel': 'miss',
                         'cache_similarity': best_score,
                     }
-                return {'cache_hit': False, 'question_hash': question_hash,
-                        'cache_channel': 'miss'}
+                return {'cache_hit': False, 'question_hash': question_hash, 'cache_channel': 'miss'}
             if _is_cache_expired(entry, settings.cache_ttl_days):
                 session.delete(entry)
                 logger.info('问答[缓存] 精确条目已过期丢弃 q=%.30s', state['question'])
-                return {'cache_hit': False, 'question_hash': question_hash,
-                        'cache_channel': 'miss'}
+                return {'cache_hit': False, 'question_hash': question_hash, 'cache_channel': 'miss'}
             if _is_stale_refusal(entry, state):
                 # 环境性失败期间写入的「答不了」，环境已恢复 → 删除并重新回答
-                logger.warning('问答[缓存] 丢弃陈旧拒答缓存 id=%s channel=%s q=%.30s',
-                               entry.id, state['question'])
+                logger.warning(
+                    '问答[缓存] 丢弃陈旧拒答缓存 id=%s channel=%s q=%.30s',
+                    entry.id,
+                    state['question'],
+                )
                 session.delete(entry)
-                return {'cache_hit': False, 'question_hash': question_hash,
-                        'cache_channel': 'miss', 'cache_invalidated': True}
+                return {
+                    'cache_hit': False,
+                    'question_hash': question_hash,
+                    'cache_channel': 'miss',
+                    'cache_invalidated': True,
+                }
             touch_qa_cache_hit(session, entry)
             answer = entry.answer
             citations = list(entry.citations or [])
@@ -569,12 +623,7 @@ def build_qa_graph(
             with ThreadPoolExecutor(max_workers=min(len(doc_ids), 8)) as executor:
                 grouped = list(executor.map(_retrieve_one, doc_ids))
             merged = sorted(
-                (
-                    hit
-                    for group in grouped
-                    for hit in group
-                    if hit.document_id in indexed_ids
-                ),
+                (hit for group in grouped for hit in group if hit.document_id in indexed_ids),
                 key=lambda hit: hit.score,
                 reverse=True,
             )[:total_k]
@@ -583,8 +632,13 @@ def build_qa_graph(
                 for document in list_documents(session):
                     if document.id in doc_ids:
                         titles[document.id] = document.filename
-            logger.info('问答[检索] q=%.30s docs=%s indexed=%s merged=%d',
-                        question, doc_ids, sorted(indexed_ids), len(merged))
+            logger.info(
+                '问答[检索] q=%.30s docs=%s indexed=%s merged=%d',
+                question,
+                doc_ids,
+                sorted(indexed_ids),
+                len(merged),
+            )
             return {'chunks': [_chunk_to_dict(hit) for hit in merged], 'doc_titles': titles}
         hits = retriever.retrieve(question, document_id=state.get('document_id'))
         hits = [hit for hit in hits if hit.document_id in indexed_ids]
@@ -595,8 +649,9 @@ def build_qa_graph(
                 document = get_document(session, doc_id)
                 if document is not None:
                     titles[document.id] = document.filename
-        logger.info('问答[检索] q=%.30s doc=%s hit=%d', question,
-                    state.get('document_id'), len(hits))
+        logger.info(
+            '问答[检索] q=%.30s doc=%s hit=%d', question, state.get('document_id'), len(hits)
+        )
         return {'chunks': [_chunk_to_dict(hit) for hit in hits], 'doc_titles': titles or None}
 
     def judge(state: QAState) -> dict:
@@ -616,8 +671,11 @@ def build_qa_graph(
         ``get_or_create_hitl_task``（按 thread_id 取或建）。
         """
         thread_id = (config or {}).get('configurable', {}).get('thread_id')
-        logger.info('问答[HITL] 信息不足，进入澄清流程 q=%.30s thread=%.24s',
-                    state['question'], thread_id or '(无)')
+        logger.info(
+            '问答[HITL] 信息不足，进入澄清流程 q=%.30s thread=%.24s',
+            state['question'],
+            thread_id or '(无)',
+        )
         with session_scope(session_factory) as session:
             if thread_id:
                 task = get_or_create_hitl_task(
@@ -636,8 +694,9 @@ def build_qa_graph(
             doc_id = state.get('document_id')
             degraded = _retrieval_was_degraded(session, doc_id)
             if degraded:
-                logger.warning('问答[HITL] 检索环境退化（doc=%s 未入库完成），本次判定不写缓存',
-                               doc_id)
+                logger.warning(
+                    '问答[HITL] 检索环境退化（doc=%s 未入库完成），本次判定不写缓存', doc_id
+                )
             if (
                 settings.cache_enabled
                 and state.get('question_hash')
@@ -699,9 +758,9 @@ def build_qa_graph(
         tool_calls = []
         if hasattr(chat_model, 'bind_tools'):
             try:
-                response = chat_model.bind_tools(
-                    [final_answer, request_clarification]
-                ).invoke(prompt)
+                response = chat_model.bind_tools([final_answer, request_clarification]).invoke(
+                    prompt
+                )
                 tool_calls = getattr(response, 'tool_calls', None) or []
             except Exception:
                 logger.exception('问答[answer] 工具调用异常，回退纯文本')
@@ -716,8 +775,9 @@ def build_qa_graph(
             args = call.get('args') or {}
             if call.get('name') == 'request_clarification':
                 missing = args.get('missing_info') or ''
-                logger.info('问答[answer] 工具判定信息不足 → HITL missing=%.50s (%.0fms)',
-                            missing, cost_ms)
+                logger.info(
+                    '问答[answer] 工具判定信息不足 → HITL missing=%.50s (%.0fms)', missing, cost_ms
+                )
                 if not state.get('clarification'):
                     # 转入 HITL 澄清，不缓存该回答、不写入聊天记录
                     return {'needs_clarification': True, 'answer': None, 'citations': []}
@@ -725,8 +785,7 @@ def build_qa_graph(
                 content = missing or '澄清后原文信息仍然不足。'
             else:
                 content = args.get('answer') or ''
-                logger.info('问答[answer] 工具 final_answer len=%d (%.0fms)', len(content),
-                            cost_ms)
+                logger.info('问答[answer] 工具 final_answer len=%d (%.0fms)', len(content), cost_ms)
         else:
             # 兜底 1：模型未走工具，按纯文本处理
             content = response.content if hasattr(response, 'content') else str(response)
@@ -831,13 +890,14 @@ def build_qa_graph(
         """
         return 'retrieve' if state.get('clarification') else 'record'
 
-
     def context_load(state: QAState) -> dict:
         """读回最近对话 + 长会话滚动摘要任务（时间正序，不含本轮）。"""
         sid = state.get('session_id')
         if not sid:
+            # 如果非本轮会话，则无上下文
             return {'history': [], 'summary': None, 'summary_pending': None}
         with session_scope(session_factory) as session:
+            # 查询本session最近HISTORY_TURNS轮对话内容，order by 会话内容id 倒排；最新的对话在前面
             rows = list(
                 session.scalars(
                     select(ChatMessage)
@@ -846,19 +906,27 @@ def build_qa_graph(
                     .limit(HISTORY_TURNS)
                 )
             )
+            # 倒序一下，按时间顺序排
             rows.reverse()  # 时间正序（最早在前）
-            total = session.scalar(
-                select(func.count(ChatMessage.id)).where(ChatMessage.session_id == sid)
-            ) or 0
-            truncated = total > len(rows)
+            # 计算本轮对话一共多少条对话内容
+            total = (
+                session.scalar(
+                    select(func.count(ChatMessage.id)).where(ChatMessage.session_id == sid)
+                )
+                or 0
+            )
+            truncated = total > len(rows) # 判断是否被截断，即对话内容超出HISTORY_TURNS
             summary_text = None
             pending = None
             if truncated:
-                anchor = rows[0].id  # 窗口内最早一条消息 id
-                stored = _load_summary(session, sid)
+                anchor = rows[0].id  # 锚点，窗口内最早一条消息 id
+                logger.info('anchor:%d', anchor)
+                stored = _load_summary(session, sid) # 获取本轮对话的总结摘要
                 if stored:
                     summary_text = stored.get('text')
                 upto = int((stored or {}).get('upto') or 0)
+                logger.info('upto:%d', upto)
+
                 if anchor - 1 > upto:
                     # 增量：仅摘要 (upto, anchor-1] 区间内滚出窗口的消息
                     old_rows = list(
@@ -908,24 +976,53 @@ def build_qa_graph(
                 chat.summary = json.dumps(
                     {'upto': pending['anchor'] - 1, 'text': text}, ensure_ascii=False
                 )
-        logger.info('问答[摘要] 增量 upto=%d chars=%d (%.0fms)',
-                    pending['anchor'] - 1, len(text), cost_ms)
+        logger.info(
+            '问答[摘要] 增量 upto=%d chars=%d (%.0fms)', pending['anchor'] - 1, len(text), cost_ms
+        )
         return {'summary': text}
 
     def gate(state: QAState) -> dict:
         """检索门：只要在会话里就分类本轮意图(含第一问)；无会话(如 MCP 工具调用)直接 book。
 
         history=询问会话历史本身；chat=寒暄闲聊；book=书内容(默认)。
-        解析失败一律回落 book——宁可进检索，也不吞问题。
+        **三级级联**(见 graph/intent.py)：规则 → 向量原型 → LLM；前两层零 LLM 调用，
+        只有它们都拿不准时才付一次 LLM。意图判错的代价不对称（判成 chat/history 会
+        直接吞掉用户的问题，判成 book 只是多检索一次），所以：
+        - 拿不准一律回落 book——宁可进检索，也不吞问题；
+        - L2 原型层只敢自动判 book，chat/history 只由高精度规则层裁。
         注:第一问历史为空,同样要过门——否则首轮"你好"会掉进书问答链路被判信息不足。
         """
         if not state.get('session_id'):
-            return {'intent': 'book'}
+            return {'intent': 'book', 'intent_channel': 'llm'}
         question = state['question']
-        raw = None
-        prompt_text = _build_gate_prompt(
-            question, state.get('history'), state.get('summary')
+        settings = get_settings()
+
+        # ---- L1/L2 快通道：命中即出意图，零 LLM 调用 ----
+        decision = route_fast(
+            question,
+            prototype_router,
+            lambda: retriever.embed(question),
+            rules_enabled=settings.intent_rules_enabled,
         )
+        if decision.intent:
+            logger.info(
+                '问答[gate] q=%.30s intent=%s channel=%s rule=%s score=%s (0 次 LLM)',
+                question,
+                decision.intent,
+                decision.channel,
+                decision.rule_label or '-',
+                f'{decision.score:.4f}' if decision.score is not None else '-',
+            )
+            return {
+                'intent': decision.intent,
+                'intent_channel': decision.channel,
+                'intent_score': decision.score,
+                'intent_embedding': decision.vector,
+            }
+
+        # ---- L3 LLM 兜底：只处理前两层拿不准的余量 ----
+        raw = None
+        prompt_text = _build_gate_prompt(question, state.get('history'), state.get('summary'))
         start_ts = time.perf_counter()
         try:
             resp = chat_model.invoke(prompt_text)
@@ -938,17 +1035,25 @@ def build_qa_graph(
                 if cand in raw:
                     intent = cand
                     break
-        logger.info('问答[gate] q=%.30s intent=%s raw=%s in_chars=%d (%.0fms)',
-                    question, intent, raw, len(prompt_text),
-                    (time.perf_counter() - start_ts) * 1000)
-        return {'intent': intent}
+        logger.info(
+            '问答[gate] q=%.30s intent=%s raw=%s channel=llm in_chars=%d (%.0fms)',
+            question,
+            intent,
+            raw,
+            len(prompt_text),
+            (time.perf_counter() - start_ts) * 1000,
+        )
+        return {
+            'intent': intent,
+            'intent_channel': 'llm',
+            'intent_score': decision.score,
+            'intent_embedding': decision.vector,
+        }
 
     def context_answer(state: QAState) -> dict:
         """history/chat 分支：不检索书籍，仅凭对话记录/寒暄作答；结果写回记录。"""
         question = state['question']
-        prompt = _build_context_prompt(
-            question, state.get('history') or [], state.get('summary')
-        )
+        prompt = _build_context_prompt(question, state.get('history') or [], state.get('summary'))
         content = ''
         response = None
         try:
@@ -969,8 +1074,12 @@ def build_qa_graph(
                 content = str(content)
         if not content:
             content = '抱歉，我暂时没理解你的意思，换个说法试试？'
-        logger.info('问答[context_answer] intent=%s q=%.30s len=%d',
-                    state.get('intent'), question, len(content))
+        logger.info(
+            '问答[context_answer] intent=%s q=%.30s len=%d',
+            state.get('intent'),
+            question,
+            len(content),
+        )
         return {'answer': content, 'citations': []}
 
     def route_after_gate(state: QAState) -> str:
@@ -989,6 +1098,7 @@ def build_qa_graph(
     graph.add_node('summarize', summarize)
     graph.add_node('gate', gate)
     graph.add_node('context_answer', context_answer)
+
     graph.add_edge(START, 'context_load')
     graph.add_edge('context_load', 'record_question')
     graph.add_edge('record_question', 'summarize')
@@ -1022,5 +1132,7 @@ def build_qa_graph(
     )
     graph.add_edge('record', END)
     return graph.compile(checkpointer=checkpointer or InMemorySaver())
+
+
 if __name__ == '__main__':
     print(build_qa_graph().get_graph().draw_mermaid())

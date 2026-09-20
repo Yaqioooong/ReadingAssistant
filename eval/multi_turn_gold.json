@@ -1,5 +1,5 @@
 {
-  "说明": "多轮意图评测集：按会话逐轮回放，校验检索门路由(book/history/chat)与历史回忆内容。in_answer 为历史轮必须出现在回答中的子串。",
+  "说明": "多轮意图评测集：按会话逐轮回放，校验检索门路由(book/history/chat)与历史回忆内容。in_answer 为历史轮必须出现在回答中的子串。 split=tune 用于阈值标定；split=holdout 为冻结阈值后新增的对抗集，不参与调参。",
   "cases": [
     {
       "id": "mt-01-history-last",
@@ -23,7 +23,8 @@
           "question": "再上一个呢？",
           "route": "history"
         }
-      ]
+      ],
+      "split": "tune"
     },
     {
       "id": "mt-02-chitchat",
@@ -41,7 +42,8 @@
           "question": "谢谢你的回答",
           "route": "chat"
         }
-      ]
+      ],
+      "split": "tune"
     },
     {
       "id": "mt-03-referential-followup",
@@ -59,7 +61,8 @@
           "question": "那第一个计划又是什么？",
           "route": "book"
         }
-      ]
+      ],
+      "split": "tune"
     },
     {
       "id": "mt-04-clarify-resume",
@@ -74,7 +77,8 @@
           "route": "book",
           "clarification": "请以文档一的内容回答"
         }
-      ]
+      ],
+      "split": "tune"
     },
     {
       "id": "mt-05-first-turn-meta",
@@ -84,7 +88,8 @@
           "question": "我上一个问题是什么？",
           "route": "history"
         }
-      ]
+      ],
+      "split": "tune"
     },
     {
       "id": "mt-06-long-session-early",
@@ -114,7 +119,8 @@
           "question": "我第一个问题是什么？",
           "route": "history"
         }
-      ]
+      ],
+      "split": "tune"
     },
     {
       "id": "mt-07-first-turn-greeting",
@@ -123,6 +129,87 @@
         {
           "question": "hello",
           "route": "chat"
+        }
+      ],
+      "split": "tune"
+    },
+    {
+      "id": "mt-08-adversarial-chat-wrap-book",
+      "split": "holdout",
+      "note": "留出集:寒暄词包裹的书问题,必须走 book(规则层不得被寒暄词带走)",
+      "turns": [
+        {
+          "question": "谢谢，那《三体》里罗辑最后怎么了？",
+          "route": "book"
+        },
+        {
+          "question": "你好，请问面壁计划是什么？",
+          "route": "book"
+        },
+        {
+          "question": "再见，顺便问一下程心的结局",
+          "route": "book"
+        }
+      ]
+    },
+    {
+      "id": "mt-09-adversarial-book-in-meta-shell",
+      "split": "holdout",
+      "note": "留出集:元问题外壳 + 书内容内核,必须走 book",
+      "turns": [
+        {
+          "question": "《三体》中面壁计划是什么？",
+          "route": "book"
+        },
+        {
+          "question": "我上一个问题里问的那个人是谁？",
+          "route": "book"
+        },
+        {
+          "question": "再说一下我上一个问题里提到的计划",
+          "route": "book"
+        }
+      ]
+    },
+    {
+      "id": "mt-10-adversarial-colloquial-meta",
+      "split": "holdout",
+      "note": "留出集:口语化元问题(含装点性前缀/口语尾巴),必须走 history",
+      "turns": [
+        {
+          "question": "《三体》中罗辑的咒语指的是什么？",
+          "route": "book"
+        },
+        {
+          "question": "那对了麻烦你…我上次问了啥？",
+          "route": "history"
+        },
+        {
+          "question": "我上一回问了什么？",
+          "route": "history"
+        },
+        {
+          "question": "你重复一下我问过的话",
+          "route": "history"
+        }
+      ]
+    },
+    {
+      "id": "mt-11-adversarial-impersonal-followup",
+      "split": "holdout",
+      "note": "留出集:无第一人称的指代追问,必须走 book(规则层不得抢判)",
+      "turns": [
+        {
+          "question": "《三体》中面壁计划是什么？",
+          "route": "book"
+        },
+        {
+          "question": "你刚才说的那段再解释一下",
+          "route": "book"
+        },
+        {
+          "question": "上一个章节讲了什么？",
+          "route": "book"
         }
       ]
     }

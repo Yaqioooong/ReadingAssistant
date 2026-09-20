@@ -68,6 +68,9 @@ class AskResponse(BaseModel):
     # False = 降级为重跑（旧记录 / 未配置持久化 checkpoint）
     resumable: bool = False
     intent: str | None = None  # 检索门分类: book | history | chat(供评测/观测)
+    # 意图判定通道: rule(规则快通道) | prototype(向量原型) | llm(兜底)；供评测看省了多少次 LLM
+    intent_channel: str | None = None
+    intent_score: float | None = None  # prototype 通道判定时的余弦分
     # 缓存来源（供指标看板与前端反馈使用）
     cache_hit: bool = False
     cache_channel: str | None = None  # exact | semantic | identifier | miss | disabled

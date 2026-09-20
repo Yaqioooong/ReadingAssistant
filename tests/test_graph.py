@@ -275,6 +275,8 @@ class TestQaGraph:
             embedding_model=FakeEmbeddings([1.0, 0.0]),
         )
 
+        print(graph.get_graph().draw_mermaid())
+
         result = graph.invoke(
             {'question': '某问题', 'clarification': '补充：请结合张三出场回答'},
             config={'configurable': {'thread_id': 'qa-3'}},

@@ -2,7 +2,17 @@
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -91,13 +101,29 @@ class HitlTask(Base):
 
 
 class QaCacheEntry(Base):
-    """问答结果缓存：命中后跳过LLM/Embedding调用"""
+    """问答结果缓存：命中后跳过LLM/Embedding调用。
+
+    键 = (question_hash, content_hash)，即 **问题 × 文档版本**：
+
+    - ``question_hash`` = 归一化问题 + 澄清补充 + 文档范围(document_id)；
+    - ``content_hash`` = 该文档的版本指纹（单书=该文档 content_hash，
+      全库=已入库语料指纹），语义是「这条答案是从哪一版原文推出来的」。
+
+    两者都可能变（换版/重传、增删书），所以**必须**是复合唯一：代码的读路径
+    （``get_qa_cache_entry`` 与语义层的 ``list_qa_cache_entries``）一直按这两列一起筛选，
+    若 DB 只许 ``question_hash`` 单列唯一，就等于「代码声明版本参与身份、DB 却禁止
+    两行只差版本」——一旦版本真的变了，写路径插新行必撞唯一约束，整轮问答失败且永久复发。
+    """
 
     __tablename__ = 'qa_cache'
+    __table_args__ = (
+        Index('uq_qa_cache_question_version', 'question_hash', 'content_hash', unique=True),
+    )
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     question_raw: Mapped[str] = mapped_column(Text, nullable=False)
     question_normalized: Mapped[str] = mapped_column(Text, nullable=False)
-    question_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # 非唯一索引：单列查询走它，复合唯一索引负责判身份
+    question_hash: Mapped[str] = mapped_column(String(64), index=True)
     question_embedding: Mapped[list] = mapped_column(JSON)
     answer: Mapped[str | None] = mapped_column(Text)
     citations: Mapped[list] = mapped_column(JSON, default=list)

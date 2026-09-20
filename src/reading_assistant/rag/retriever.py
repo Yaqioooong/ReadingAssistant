@@ -140,7 +140,6 @@ class Retriever:
             if key in self._embed_cache:
                 self._embed_cache.move_to_end(key)  # LRU语义
                 return self._embed_cache[key]
-        # 模型调用放在锁外，避免 fan-out 线程被串行化
         vector = self._embedding_model.embed_query(normalize_question(query))
         with self._embed_lock:
             self._embed_cache[key] = vector

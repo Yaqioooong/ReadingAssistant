@@ -131,6 +131,9 @@ class TestMultiTurnContext:
             sid = client.post('/api/sessions').json()['session_id']
             first = _ask(client, sid, '张三喜欢谁？', doc=1)
             assert first['answer'] and first['needs_clarification'] is False
+            assert first['intent'] == 'book'
+            # 书问题：规则层不敢判、原型层在退化 embedding 下不敢确认 → 只能付一次 LLM
+            assert first['intent_channel'] == 'llm', '书问题应走 LLM 兜底'
             assert llm.gate_calls == 1, '首问也要过检索门(否则 hello 会掉进书链路)'
 
             meta = _ask(client, sid, '我上一个问题是什么？')
@@ -138,7 +141,10 @@ class TestMultiTurnContext:
             assert meta['citations'] == []
             assert meta['needs_clarification'] is False
             assert meta['intent'] == 'history', '历史回忆轮应暴露 history 意图'
-            assert llm.gate_calls == 2
+            # 契约(2026-09-18 意图级联)：元问题由 L1 规则快通道直接判定，**不再调用 LLM**。
+            # 这条断言以前是 gate_calls == 2（钉住「每轮必调 LLM」的旧行为）。
+            assert meta['intent_channel'] == 'rule', meta
+            assert llm.gate_calls == 1, '规则快通道命中不应再产生 LLM 调用'
 
             msgs = client.get(f'/api/sessions/{sid}/messages').json()
             user_msgs = [m['content'] for m in msgs if m['role'] == 'user']
@@ -157,6 +163,8 @@ class TestMultiTurnContext:
             assert resp['needs_clarification'] is False
             assert resp.get('hitl_task_id') is None, '寒暄不应创建澄清任务'
             assert resp['citations'] == []
+            assert resp['intent_channel'] == 'rule', '寒暄应由规则快通道零 LLM 判定'
+            assert llm.gate_calls == 0, '首轮寒暄不该调用 LLM'
             with factory() as session:
                 assert list(session.scalars(select(QaCacheEntry))) == [], '寒暄不入缓存'
 
@@ -173,6 +181,18 @@ class TestMultiTurnContext:
             assert r['citations'] == []
             assert r['needs_clarification'] is False
             assert llm.context_calls == 1
+
+    def test_cascade_skips_llm_for_rule_handled_turns(self, tmp_path: Path) -> None:
+        """契约：规则层能判的轮次，检索门一次 LLM 都不花（本次优化的收益所在）。"""
+        llm = RouterLLM()
+        llm.context_reply = '你好呀，想从书里了解点什么？'
+        client, _ = _make_env(tmp_path, llm)
+        with client:
+            sid = client.post('/api/sessions').json()['session_id']
+            assert _ask(client, sid, '你好')['intent'] == 'chat'
+            assert _ask(client, sid, '谢谢你的回答')['intent'] == 'chat'
+            assert _ask(client, sid, '我上一个问题是什么？')['intent'] == 'history'
+            assert llm.gate_calls == 0, '三轮全由规则快通道判定，不应产生检索门 LLM 调用'
 
     def test_book_followup_injects_history(self, tmp_path: Path) -> None:
         llm = RouterLLM()

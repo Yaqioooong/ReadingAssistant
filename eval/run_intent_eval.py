@@ -131,6 +131,11 @@ def run(mode: str, limit: int, keep_sessions: bool = False) -> dict:
     content_ok = 0
     content_total = 0
     confusion: dict[str, dict[str, int]] = {}
+    # 意图级联观测：通道分布 + 检索门真正走了 LLM 兜底的轮次数。
+    # channel=='llm' 即「这一轮的意图判定付了一次 LLM」，这就是本次优化要压低的数量。
+    # ⚠️ 澄清续答轮不重跑 gate，其 channel 是 checkpoint 继承值，按轮次定义一并计入。
+    channel_counts: dict[str, int] = {}
+    splits: dict[str, dict[str, int]] = {}
     with client:
         for case in cases:
             sid = client.post('/api/sessions').json()['session_id']
@@ -147,12 +152,21 @@ def run(mode: str, limit: int, keep_sessions: bool = False) -> dict:
                 case_pass = case_pass and ok
                 confusion.setdefault(expected, {}).setdefault(actual, 0)
                 confusion[expected][actual] += 1
+                channel = resp.get('intent_channel') or 'unknown'
+                channel_counts[channel] = channel_counts.get(channel, 0) + 1
+                bucket = splits.setdefault(
+                    case.get('split', 'tune'), {'turn': 0, 'route_ok': 0, 'llm_gate': 0}
+                )
+                bucket['turn'] += 1
+                bucket['route_ok'] += int(ok)
+                bucket['llm_gate'] += int(channel == 'llm')
                 record = {
                     'turn': idx + 1,
                     'question': turn['question'][:40],
                     'expected': expected,
                     'actual': actual,
                     'ok': ok,
+                    'intent_channel': channel,
                 }
                 if 'in_answer' in turn:
                     content_total += 1
@@ -162,7 +176,8 @@ def run(mode: str, limit: int, keep_sessions: bool = False) -> dict:
                     record['in_answer_hit'] = hit
                     case_pass = case_pass and hit
                 per_turn.append(record)
-            case_results.append({'id': case['id'], 'pass': case_pass, 'turns': per_turn})
+            case_results.append({'id': case['id'], 'split': case.get('split', 'tune'),
+                                  'pass': case_pass, 'turns': per_turn})
 
         # 清场：评测会话是抛头（会产生 awaiting 澄清任务），默认跑完即删，
         # 避免污染生产库、也避免任务在前端以「待补充」卡片形式回流。
@@ -184,6 +199,17 @@ def run(mode: str, limit: int, keep_sessions: bool = False) -> dict:
         'route_accuracy': route_ok / total if total else 0.0,
         'content_accuracy': content_ok / content_total if content_total else None,
         'confusion': confusion,
+        'llm_gate_turns': channel_counts.get('llm', 0),  # 检索门走 LLM 兜底的轮次
+        'intent_channel': channel_counts,
+        'splits': {
+            name: {
+                'turn': stats['turn'],
+                'route_accuracy': stats['route_ok'] / stats['turn'] if stats['turn'] else 0.0,
+                'llm_gate_turns': stats['llm_gate'],
+                'llm_gate_rate': stats['llm_gate'] / stats['turn'] if stats['turn'] else 0.0,
+            }
+            for name, stats in splits.items()
+        },
     }
     report_path = REPORT_DIR / f'intent_report_{mode}.json'
     REPORT_DIR.mkdir(exist_ok=True)
@@ -206,6 +232,14 @@ def main() -> None:
     summary, case_results = run(args.mode, args.limit, args.keep_sessions)
     content_acc = summary['content_accuracy']
     content_txt = '—' if content_acc is None else f'{content_acc:.2%}'
+    total = summary['turn_total'] or 1
+    saved = 1 - summary['llm_gate_turns'] / total
+    print(f"  LLM 兜底轮次 {summary['llm_gate_turns']}/{summary['turn_total']}"
+          f" ({saved:.1%} 由快通道零调用判定)")
+    print(f"  通道分布 {summary['intent_channel']}")
+    for name, stats in summary['splits'].items():
+        print(f"  [{name}] 轮次={stats['turn']} 路由准确率={stats['route_accuracy']:.2%} "
+              f"LLM 兜底={stats['llm_gate_turns']} ({stats['llm_gate_rate']:.1%})")
     print(f"[intent-eval {summary['mode']}] cases={summary['case_count']} "
           f"turns={summary['turn_total']} route_acc={summary['route_accuracy']:.2%} "
           f"content_acc={content_txt}")
