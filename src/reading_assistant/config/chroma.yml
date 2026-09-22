@@ -1,6 +1,10 @@
 collection_name: reading_agent_chunks
 persist_directory: rag/chroma_db
-k: 6
+# 取回并注入 prompt 的片段数。2026-09-20 实测：6 → 16 使 e2e pass_rate 0.829 → 0.948（两轮均值，
+# 区间不重叠），幻觉率下降，延迟几乎不变（prompt 约 3.9k → 9.2k 字符）。
+# 注意 hybrid 模式下候选池是 hybrid_pool_size(50)，正确的片段常已在池内，
+# 只是被这个 k 截掉了 —— 所以调大 k 往往比调检索算法更划算。
+k: 16
 data_path: data
 allow_knowledge_file_type: ['txt','pdf','epub']
 chunk_size: 800

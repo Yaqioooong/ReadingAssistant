@@ -17,6 +17,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from reading_assistant.config import get_settings
+from reading_assistant.graph.agent import (
+    AgentBudget,
+    ToolBox,
+    merge_agent_chunks,
+    run_agent_loop,
+)
 from reading_assistant.graph.intent import build_prototype_router, route_fast
 from reading_assistant.model.factory import get_chat_model, get_embedding_model
 from reading_assistant.rag import create_retriever
@@ -72,6 +78,10 @@ class QAState(TypedDict, total=False):
     intent_channel: str | None  # 意图判定通道: rule | prototype | llm(供观测/评测)
     intent_score: float | None  # L2 原型判定时的余弦分(仅观测)
     intent_embedding: list[float] | None  # L2 算出的问题向量, 供 cache_check 复用免重复 embedding
+    # --- 检索 agent（有界 ReAct，见 graph/agent.py）---
+    agent_used: bool  # 本问题是否已用过 agent（每题至多一次，防循环放大成本）
+    agent_trace: list[dict] | None  # 每步 Thought→Action→Observation 摘要（供观测）
+    agent_steps: int  # agent 实际执行的步数
 
 
 def interrupt_payload(result: dict | None) -> dict | None:
@@ -144,8 +154,15 @@ def _build_answer_prompt(
                 '2. 需要引用原文时，在对应句子末尾用 [n] 标注（n 为片段编号），'
                 '例如：朱六希望张三喜欢王五[1]。\n'
                 '   引用要精准：只标注答案实际依据的片段，不要为所有片段都标注。\n'
-                '3. 若原文片段足以回答，请调用 final_answer 工具提交回答；'
-                '若不足以回答，请调用 request_clarification 工具并说明缺少什么。'
+                '3. 若原文片段足以回答，请调用 final_answer 工具提交回答。\n'
+                '4. 若原文片段**不能直接、明确地回答**，必须调用 request_clarification 工具，'
+                '并在 missing_info 里说明还缺什么。\n'
+                '   ⚠️ 下列情形都属于「不能直接回答」，**不要**用文字绕过、'
+                '更不要写「原文片段不足以确定…」之类的说明当作回答：\n'
+                '   - 片段里只出现了相关但**不同**的对象（例如问「第一个」却只找到其他同类）；\n'
+                '   - 需要更多背景才能定位到问的那一处；\n'
+                '   - 问题涉及原文未交代的信息。\n'
+                '   漏报「不足」会让系统拿错误的片段作答，比多问一次代价大得多。'
             ),
         ]
     )
@@ -442,9 +459,7 @@ def build_qa_graph(
     retriever = create_retriever(vector_store, embedding)
     # 意图识别 L2 层：原型向量在图构建时算一次（图/app 是单例，不会每请求重算）
     _embed_documents = getattr(embedding, 'embed_documents', None)
-    prototype_router = (
-        build_prototype_router(_embed_documents) if _embed_documents else None
-    )
+    prototype_router = build_prototype_router(_embed_documents) if _embed_documents else None
 
     def cache_check(state: QAState) -> dict:
         if len(state.get('document_ids') or []) > 1:
@@ -471,9 +486,7 @@ def build_qa_graph(
                     # ⚠️ 带 clarification 时不能复用：cache_check 要嵌的是
                     # question + 补充说明，与 L2 嵌的裸 question 不是一个向量。
                     embedding = (
-                        state.get('intent_embedding')
-                        if not state.get('clarification')
-                        else None
+                        state.get('intent_embedding') if not state.get('clarification') else None
                     )
                     if embedding is None:
                         embedding = retriever.embed(
@@ -871,16 +884,137 @@ def build_qa_graph(
                 )
         return {}
 
+    # 构图期确定：模型是否支持工具调用（测试里的 fake LLM 多数只有 invoke）
+    agent_tool_support = hasattr(chat_model, 'bind_tools')
+    state_scope: dict = {}
+
+    def _agent_search(query: str) -> list:
+        """agent 的语义检索通道：复用既有 retriever 与文档范围白名单。
+
+        与 ``retrieve`` 同源（hybrid 检索、同一 min_score、同一 indexed 白名单），
+        保证 agent 拿到的片段与主链路质量一致 —— agent 只是多给了「换策略」的能力，
+        不引入第二套检索语义。
+        """
+        with session_scope(session_factory) as session:
+            indexed_ids = set(list_indexed_document_ids(session))
+        doc_ids = state_scope.get('document_ids') or []
+        if len(doc_ids) > 1:
+            merged: list = []
+            for doc_id in doc_ids:
+                if doc_id in indexed_ids:
+                    merged.extend(retriever.retrieve(query, document_id=doc_id))
+            merged.sort(key=lambda hit: hit.score, reverse=True)
+            return merged[: get_settings().top_k]
+        single = state_scope.get('document_id')
+        hits = retriever.retrieve(query, document_id=single)
+        return [hit for hit in hits if hit.document_id in indexed_ids]
+
+    def agent(state: QAState, config: RunnableConfig) -> dict:
+        """有界 ReAct 检索：模型自己选工具（search/grep/list_chapters/read_chapter/finish）。
+
+        位置：它是**「一次检索」与「问人」之间的那一级台阶**。
+        - 由 ``judge`` 进来 = 一次检索什么都没拿到；
+        - 由 ``answer`` 进来 = 拿到了但模型判定不足以回答；
+        - 走完仍不够 → 才落到 ``create_hitl``（今天的行为）。
+
+        ⚠️ 每题至多一次（``agent_used`` 闸）：agent 内部已有 ``max_steps`` 预算，
+        但若允许它被反复进入，单题成本会乘以进入次数 —— 而收益递减。
+        一次打不开就交给人，比无限加码检索更像生产系统该有的样子。
+
+        ⚠️ **重放安全性**：本节点全部工具只读（检索/字面扫描/取章），
+        所以 ``interrupt()`` 恢复时即便被整体重跑，也只是重算一遍、无副作用。
+        这是把循环放在节点内部（而非图上新增环）的前提 —— 图上的环会让恢复变成整圈重放。
+        """
+        nonlocal state_scope
+        state_scope = {
+            'document_id': state.get('document_id'),
+            'document_ids': state.get('document_ids') or [],
+        }
+        settings = get_settings()
+        doc_ids = state.get('document_ids') or []
+        titles: dict[int, str] = dict(state.get('doc_titles') or {})
+        if not titles:
+            with session_scope(session_factory) as session:
+                wanted = set(doc_ids) or {d.id for d in list_documents(session)}
+                for document in list_documents(session):
+                    if document.id in wanted:
+                        titles[document.id] = document.filename
+
+        toolbox = ToolBox(
+            vector_store=vector_store,
+            search_fn=_agent_search,
+            document_ids=doc_ids or None,
+            doc_titles=titles,
+        )
+        budget = AgentBudget(max_steps=settings.agent_max_steps, max_chunks=settings.top_k)
+        start = time.perf_counter()
+        run = run_agent_loop(
+            model=chat_model,
+            toolbox=toolbox,
+            question=state['question'],
+            history=state.get('history'),
+            budget=budget,
+            seed_chunks=state.get('chunks') or None,
+        )
+        cost_ms = (time.perf_counter() - start) * 1000
+        logger.info(
+            '问答[agent] q=%.30s steps=%d stopped=%s finished=%s chunks=%d (%.0fms)',
+            state['question'], run.steps, run.stopped_by, run.finished,
+            len(run.chunks), cost_ms,
+        )
+
+        # 合并策略：agent 片段优先，但保证原有片段不被清空（见 merge_agent_chunks 的说明）
+        merged = merge_agent_chunks(
+            run.chunks, list(state.get('chunks') or []), budget.max_chunks
+        )
+        kept_original = sum(
+            1 for c in merged
+            if str(c.get('chunk_id') or '') in
+            {str(o.get('chunk_id') or '') for o in (state.get('chunks') or [])}
+        )
+        logger.info(
+            '问答[agent] 合并后 %d 条（其中原有 %d 条）—— 保证原有片段不被清空',
+            len(merged), kept_original,
+        )
+        return {
+            'chunks': merged,
+            'doc_titles': titles or None,
+            'agent_used': True,
+            'agent_trace': list(run.trace),
+            'agent_steps': run.steps,
+            'needs_clarification': False,  # 交给 answer 重新判定
+        }
+
     def route_after_cache(state: QAState) -> str:
         if not state.get('cache_hit'):
             return 'retrieve'
         return 'create_hitl' if state.get('needs_clarification') else 'record'
 
+    def _agent_available(state: QAState) -> bool:
+        """能否进 agent：开启 + 模型支持工具 + 未用过（每题至多一次）。
+
+        三者缺一不可：
+        - ``agent_enabled`` 是配置开关；
+        - ``agent_tool_support`` 在**构图期**确定（模型有没有 ``bind_tools``）——
+          没有工具能力的模型进 agent 只会白跑一轮且改变原有分流，必须在入口挡住；
+        - ``agent_used`` 保证每题至多一次：agent 内部已有 max_steps 预算，
+          但允许反复进入会让单题成本乘以进入次数，而收益递减。
+        """
+        if not get_settings().agent_enabled or not agent_tool_support:
+            return False
+        return not state.get('agent_used')
+
     def route_after_judge(state: QAState) -> str:
-        return 'create_hitl' if state.get('needs_clarification') else 'answer'
+        if not state.get('needs_clarification'):
+            return 'answer'
+        # 一次检索什么都没拿到 —— 先让 agent 换个策略自己再试
+        return 'agent' if _agent_available(state) else 'create_hitl'
 
     def route_after_answer(state: QAState) -> str:
-        return 'create_hitl' if state.get('needs_clarification') else 'record'
+        if not state.get('needs_clarification'):
+            return 'record'
+        # 模型判定「现有片段不足以回答」—— 交给 agent 补检，仍不够才问人
+        return 'agent' if _agent_available(state) else 'create_hitl'
 
     def route_after_create_hitl(state: QAState) -> str:
         """恢复后带澄清说明回到检索重跑；未挂起（不可恢复 / 澄清已用尽）则收尾。
@@ -915,13 +1049,13 @@ def build_qa_graph(
                 )
                 or 0
             )
-            truncated = total > len(rows) # 判断是否被截断，即对话内容超出HISTORY_TURNS
+            truncated = total > len(rows)  # 判断是否被截断，即对话内容超出HISTORY_TURNS
             summary_text = None
             pending = None
             if truncated:
                 anchor = rows[0].id  # 锚点，窗口内最早一条消息 id
                 logger.info('anchor:%d', anchor)
-                stored = _load_summary(session, sid) # 获取本轮对话的总结摘要
+                stored = _load_summary(session, sid)  # 获取本轮对话的总结摘要
                 if stored:
                     summary_text = stored.get('text')
                 upto = int((stored or {}).get('upto') or 0)
@@ -1082,6 +1216,14 @@ def build_qa_graph(
         )
         return {'answer': content, 'citations': []}
 
+    def route_after_agent(state: QAState) -> str:
+        """agent 交回答案节点前先看是否真有收获。
+
+        若 agent 一圈下来**一个片段都没有**（例如书里确实没有），回到 answer 只是
+        用同样的空上下文再判一次「信息不足」，纯属浪费一次 LLM → 直接转 HITL。
+        """
+        return 'answer' if state.get('chunks') else 'create_hitl'
+
     def route_after_gate(state: QAState) -> str:
         intent = state.get('intent')
         return intent if intent in ('book', 'history', 'chat') else 'book'
@@ -1092,6 +1234,7 @@ def build_qa_graph(
     graph.add_node('judge', judge)
     graph.add_node('create_hitl', create_hitl)
     graph.add_node('answer', answer)
+    graph.add_node('agent', agent)
     graph.add_node('record', record)
     graph.add_node('record_question', record_question)
     graph.add_node('context_load', context_load)
@@ -1115,15 +1258,21 @@ def build_qa_graph(
         {'retrieve': 'retrieve', 'create_hitl': 'create_hitl', 'record': 'record'},
     )
     graph.add_edge('retrieve', 'judge')
+    # agent 补检完回到 answer 重新判定；必要时由 answer 的 route 再决定是否问人
+    graph.add_conditional_edges(
+        'agent',
+        route_after_agent,
+        {'answer': 'answer', 'create_hitl': 'create_hitl'},
+    )
     graph.add_conditional_edges(
         'judge',
         route_after_judge,
-        {'answer': 'answer', 'create_hitl': 'create_hitl'},
+        {'answer': 'answer', 'agent': 'agent', 'create_hitl': 'create_hitl'},
     )
     graph.add_conditional_edges(
         'answer',
         route_after_answer,
-        {'create_hitl': 'create_hitl', 'record': 'record'},
+        {'agent': 'agent', 'create_hitl': 'create_hitl', 'record': 'record'},
     )
     graph.add_conditional_edges(
         'create_hitl',

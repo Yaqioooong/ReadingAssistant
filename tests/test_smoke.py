@@ -15,7 +15,11 @@ def test_settings_loaded_from_env_and_yaml(settings) -> None:
     # 来自 chroma.yml 的默认值
     assert settings.chunk_size == 800
     assert settings.chunk_overlap == 100
-    assert settings.top_k == 6
+    # top_k 与其 yaml 对齐即可，不硬编码具体数字：本测试要证明的是「yaml 值被加载进来了」
+    # （硬编码具体值会在每次调参时假失败；2026-09-20 调 k 6→16 时实际踩到）
+    from reading_assistant.config import get_chroma_config
+
+    assert settings.top_k == int(get_chroma_config().get('k'))
     assert settings.chroma_collection_name == 'reading_agent_chunks'
     assert '。' in settings.separators
     assert 'txt' in settings.allow_knowledge_file_type

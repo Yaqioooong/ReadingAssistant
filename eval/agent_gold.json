@@ -1,0 +1,152 @@
+{
+  "说明": "检索 agent 专项评测集。这些题在单次向量检索下结构性无解（2026-09-21 实测：min_score=0、top_k=200 都捞不到），必须靠 agent 换策略。分四类，验收标准不同：ordinal/pronoun/compound 要求答对，simple 要求【agent 不得触发】以守住单问成本。",
+  "cases": [
+    {
+      "id": "ag-ordinal-01",
+      "class": "ordinal",
+      "question": "西游记中唐僧师徒遇到的第一个妖怪是什么？",
+      "expect_contains": "寅将军",
+      "must_use_any_tool": [
+        "grep",
+        "list_chapters",
+        "read_chapter"
+      ],
+      "note": "序数类：答案段落从不出现「第一个」，向量通道结构性取不到；grep 定位 + 章序判断才可行"
+    },
+    {
+      "id": "ag-ordinal-02",
+      "class": "ordinal",
+      "question": "唐僧刚出长安、还没收徒弟的时候，在双叉岭上遇到的妖怪叫什么名字？",
+      "expect_contains": "寅将军",
+      "must_use_any_tool": [
+        "grep"
+      ],
+      "note": "序数类变体：换一种问法问同一处（不给「第一个」字样，但仍需字面定位）"
+    },
+    {
+      "id": "ag-compound-01",
+      "class": "compound",
+      "question": "西游记中唐僧师徒遇到的第一个妖怪是什么？这个妖怪的特点是什么？如何解决掉它的？",
+      "expect_contains": "寅将军",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "list_chapters"
+      ],
+      "note": "多问合一（用户实际报的那道）：三个信息需求压进一个向量会互相稀释，必须拆开逐步取  ⚠️ 2026-09-21 复核：单用 expect_contains 判定太松 —— 单次检索链路也可能答出「寅将军」这个词。真正的验收应是「三个子问题都被回答」，此处已加 expect_contains_all 作为更强的约束起点。",
+      "expect_contains_all": [
+        "寅将军"
+      ]
+    },
+    {
+      "id": "ag-compound-02",
+      "class": "compound",
+      "question": "孙悟空的师父是谁？他教了孙悟空哪些本领？后来孙悟空为什么被赶走？",
+      "expect_contains": "菩提祖师",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "list_chapters"
+      ],
+      "note": "多问合一变体：跨多章的综合问题"
+    },
+    {
+      "id": "ag-pronoun-01",
+      "class": "pronoun",
+      "question": "这个妖怪的特点是什么？",
+      "history": [
+        {
+          "role": "user",
+          "content": "西游记中唐僧师徒遇到的第一个妖怪是什么？"
+        },
+        {
+          "role": "assistant",
+          "content": "是双叉岭上的老虎精寅将军。"
+        }
+      ],
+      "expect_contains": "寅将军",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "search"
+      ],
+      "note": "代词类：检索 query 天然缺实体（历史只喂了作答、没喂检索），agent 需从对话历史里取回实体再查"
+    },
+    {
+      "id": "ag-pronoun-02",
+      "class": "pronoun",
+      "question": "他是怎么被收服的？",
+      "history": [
+        {
+          "role": "user",
+          "content": "白骨精的故事讲了什么？"
+        },
+        {
+          "role": "assistant",
+          "content": "白骨精三次变化想吃唐僧，被孙悟空识破并打死。"
+        }
+      ],
+      "expect_contains": "孙悟空",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "search"
+      ],
+      "note": "代词类变体：对上一轮结论继续追问"
+    },
+    {
+      "id": "ag-simple-01",
+      "class": "simple",
+      "question": "孙悟空的师父是谁？",
+      "expect_contains": "菩提祖师",
+      "must_not_use_agent": true,
+      "note": "守成本：单问题必须走原有单次检索链路，agent 不得触发"
+    },
+    {
+      "id": "ag-simple-02",
+      "class": "simple",
+      "question": "铁扇公主是谁的老婆？",
+      "expect_contains": "牛魔王",
+      "must_not_use_agent": true,
+      "note": "守成本同上"
+    },
+    {
+      "id": "ag-simple-03",
+      "class": "simple",
+      "question": "猪八戒的法名是什么？",
+      "expect_contains": "猪悟能",
+      "must_not_use_agent": true,
+      "note": "守成本同上"
+    },
+    {
+      "id": "ag-simple-04",
+      "class": "simple",
+      "question": "镇元子住在哪里？",
+      "expect_contains": "五庄观",
+      "must_not_use_agent": true,
+      "note": "守成本同上"
+    },
+    {
+      "id": "ag-ordinal-03-user-reported",
+      "class": "ordinal",
+      "question": "西游记中唐僧师徒四人遇到的第一个妖怪叫什么？它有什么技能？最后是怎么解决的？",
+      "expect_contains": "寅将军",
+      "must_use_any_tool": [
+        "grep"
+      ],
+      "note": "用户实际报的那道（2026-09-21 16:56 失败过）。失败机制值得留档：初始向量检索返回的 9 条里 0 条含「寅将军」、却有 2 条第二十回黄风岭内容 —— agent 若锚定「检索给的内容」就会答成黄风怪。另注意第十三回通篇不含「妖怪/妖魔/妖精」（只有「妖邪」「魔」），所以类别词 grep 会整章漏掉，必须用具体候选名比较先后。"
+    },
+    {
+      "id": "ag-ordinal-04-anchored",
+      "class": "ordinal",
+      "question": "唐僧收孙悟空为徒后，孙悟空消灭的第一个妖精是谁？它的技能是什么？",
+      "expect_contains": "虎",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "list_chapters"
+      ],
+      "note": "带**锚点事件**的序数题（2026-09-21 17:11 用户实测）。正确答案是第十四回那只「忽然见一只猛虎…照头一棒打的脑浆迸万点桃红」的**虎精**（悟空剥皮做虎皮裙）。它比第十七回的白衣秀士（白花蛇）更早 —— 后者晚三回。本题暴露两个层次：① merge 把 agent 后出的发现丢掉（已修，不再转澄清）；② agent 的 grep 候选枚举依赖模型对书的先验知识，漏了第十四回的猛虎 → 仍会答成白衣秀士。改进方向：先定位锚点事件（收徒=第十四回）所在章，再从该章往后扫。"
+    }
+  ]
+}

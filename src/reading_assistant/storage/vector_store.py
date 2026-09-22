@@ -1,6 +1,7 @@
 """向量库适配器：隔离具体实现（ChromaDB / 内存）。"""
 
 import math
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -29,6 +30,48 @@ class SearchHit:
     score: float
     metadata: dict = field(default_factory=dict)
     text: str = ''
+
+
+_CHUNK_POSITION_RE = re.compile(r'-(\d+)$')
+
+
+def _chunk_position(chunk_id: str) -> int:
+    """从 chunk id 尾号取书内位置（``doc7-<hash8>-198`` → 198）。
+
+    取不到时返回 -1（排最前），保证排序结果稳定而不抛错 ——
+    排序只用于「章内顺序」，退化不该让整次问答失败。
+    """
+    match = _CHUNK_POSITION_RE.search(chunk_id or '')
+    return int(match.group(1)) if match else -1
+
+
+def _and_where(**conditions) -> dict | None:
+    """把多个等值条件组装成 Chroma 合法的 ``where``。
+
+    ⚠️ Chroma 的 ``get``/``query`` 要求 ``where`` 里**只能有一个操作符**：
+    直接写 ``{'document_id': 7, 'chapter_index': 18}`` 会被拒
+    （``ValueError: Expected where to have exactly one operator``），
+    必须写成 ``{'$and': [{'document_id': 7}, {'chapter_index': 18}]}``。
+
+    实测（2026-09-21）：这条只在**真实 Chroma** 上炸 —— InMemoryVectorStore 自己实现
+    线性过滤、不校验 where 形状，所以单测全绿而线上 read_chapter 每次都失败。
+    凡是「按两条元数据定位」的新代码，都必须走这个 helper。
+    """
+    items = [{key: value} for key, value in conditions.items() if value is not None]
+    if not items:
+        return None
+    if len(items) == 1:
+        return items[0]
+    return {'$and': items}
+
+
+def _scope_where(document_ids: list[int] | None) -> dict | None:
+    """把文档范围转成 Chroma 的 where 子句；None 表示全库。"""
+    if not document_ids:
+        return None
+    if len(document_ids) == 1:
+        return {'document_id': document_ids[0]}
+    return {'document_id': {'$in': list(document_ids)}}
 
 
 class VectorStore(ABC):
@@ -75,6 +118,46 @@ class VectorStore(ABC):
     @abstractmethod
     def all_chunks(self) -> list[StoredChunk]:
         """返回库内全部分块（含文本与元数据），供 BM25 索引构建。"""
+
+    # ---- 结构化导航能力（供 agent 工具使用，见 graph/agent.py）----
+
+    @abstractmethod
+    def search_text(
+        self,
+        term: str,
+        document_ids: list[int] | None = None,
+        limit: int = 100,
+    ) -> list[SearchHit]:
+        """**字面包含**检索（grep）：返回正文含 ``term`` 的分块。
+
+        与 ``query``（向量相似度）是两条完全不同的通道，用途也不同：
+
+        - 序数类问题（「第一个妖怪是什么」）的答案段落**从不包含「第一个」**，
+          所以向量通道永远找不到它；而字面通道能确定性地定位实体所在章。
+          实测（2026-09-21）：`grep('寅将军')` 恰好命中 1 章，
+          而向量通道在 min_score=0、top_k=200 下都捞不到 —— 存在性判定必须走这条路。
+        - ``score`` 固定为 ``0.0``：字面命中没有相似度语义，不要拿它参与排序。
+        - 实现应走底层原生全文过滤（Chroma ``where_document``），
+          **不要**退化成 ``all_chunks()`` 全扫 —— 那是 O(全库) 的，
+          书量上去以后会成为第一个崩的地方。
+        """
+
+    @abstractmethod
+    def list_chapters(self, document_id: int) -> list[tuple[int, str]]:
+        """返回 ``document_id`` 的章节目录 ``[(chapter_index, chapter), ...]``，按书内顺序。
+
+        章顺序 = ``chapter_index`` 升序，这是**序数推理的唯一可靠依据**
+        （embedding 排序在章级只有 0.037 的 margin，不可用）。
+        """
+
+    @abstractmethod
+    def get_chapter(self, document_id: int, chapter_index: int) -> list[StoredChunk]:
+        """返回某一章的**全部**分块，按书内顺序（chunk id 尾号升序）。
+
+        刻意**不做相似度过滤**：读整章的意义就是绕开 ``retrieval_min_score`` ——
+        实测该阈值会把「描述式提问 → 诗体描写段落」这类低余弦的正确段落直接杀掉
+        （2026-09-21：答案 chunk 余弦 0.4296 < 0.45）。
+        """
 
 
 class ChromaVectorStore(VectorStore):
@@ -129,6 +212,68 @@ class ChromaVectorStore(VectorStore):
             )
             for index, chunk_id in enumerate(ids)
         ]
+
+    def search_text(
+        self,
+        term: str,
+        document_ids: list[int] | None = None,
+        limit: int = 100,
+    ) -> list[SearchHit]:
+        """字面包含检索：走 Chroma 原生 ``where_document``（非全扫）。"""
+        if not term:
+            return []
+        where = _scope_where(document_ids)
+        # 注意：where_document 的 $contains 是子串匹配，不做分词。
+        # 中文没有词边界，短词（如「妖」）会大量误命中 —— 由上层截断与聚合处理。
+        result = self._collection.get(
+            where=where,
+            where_document={'$contains': term},
+            limit=limit,
+            include=['metadatas', 'documents'],
+        )
+        ids = result.get('ids') or []
+        metadatas = result.get('metadatas') or []
+        documents = result.get('documents') or []
+        return [
+            SearchHit(
+                id=chunk_id,
+                score=0.0,  # 字面命中无相似度语义
+                metadata=metadatas[index] or {},
+                text=documents[index] or '',
+            )
+            for index, chunk_id in enumerate(ids)
+        ]
+
+    def list_chapters(self, document_id: int) -> list[tuple[int, str]]:
+        """章节目录：只取 metadatas，不取正文（避免把整本书拉进内存）。"""
+        result = self._collection.get(
+            where={'document_id': document_id}, include=['metadatas']
+        )
+        seen: dict[int, str] = {}
+        for metadata in result.get('metadatas') or []:
+            metadata = metadata or {}
+            index = metadata.get('chapter_index')
+            if index is None:
+                continue
+            seen.setdefault(int(index), str(metadata.get('chapter') or ''))
+        return sorted(seen.items())
+
+    def get_chapter(self, document_id: int, chapter_index: int) -> list[StoredChunk]:
+        """按章取全部正文；顺序由 chunk id 尾号决定（= 书内位置）。"""
+        result = self._collection.get(
+            where=_and_where(document_id=document_id, chapter_index=chapter_index),
+            include=['metadatas', 'documents'],
+        )
+        chunks = [
+            StoredChunk(
+                id=chunk_id,
+                text=(result.get('documents') or [])[index] or '',
+                metadata=(result.get('metadatas') or [])[index] or {},
+            )
+            for index, chunk_id in enumerate(result.get('ids') or [])
+        ]
+        chunks.sort(key=lambda c: _chunk_position(c.id))
+        return chunks
 
     def _distance_to_cosine(self, distance: float) -> float:
         """把 Chroma 距离换算成余弦相似度（统一量纲）。
@@ -238,6 +383,44 @@ class InMemoryVectorStore(VectorStore):
             )
         scored.sort(key=lambda hit: hit.score, reverse=True)
         return scored[:top_k]
+
+    def search_text(
+        self,
+        term: str,
+        document_ids: list[int] | None = None,
+        limit: int = 100,
+    ) -> list[SearchHit]:
+        if not term:
+            return []
+        hits = [
+            SearchHit(id=chunk.id, score=0.0, metadata=chunk.metadata, text=chunk.text)
+            for chunk in self._chunks.values()
+            if term in (chunk.text or '')
+            and (not document_ids
+                 or chunk.metadata.get('document_id') in set(document_ids))
+        ]
+        hits.sort(key=lambda hit: _chunk_position(hit.id))
+        return hits[:limit]
+
+    def list_chapters(self, document_id: int) -> list[tuple[int, str]]:
+        seen: dict[int, str] = {}
+        for chunk in self._chunks.values():
+            if chunk.metadata.get('document_id') != document_id:
+                continue
+            index = chunk.metadata.get('chapter_index')
+            if index is None:
+                continue
+            seen.setdefault(int(index), str(chunk.metadata.get('chapter') or ''))
+        return sorted(seen.items())
+
+    def get_chapter(self, document_id: int, chapter_index: int) -> list[StoredChunk]:
+        chunks = [
+            chunk for chunk in self._chunks.values()
+            if chunk.metadata.get('document_id') == document_id
+            and chunk.metadata.get('chapter_index') == chapter_index
+        ]
+        chunks.sort(key=lambda chunk: _chunk_position(chunk.id))
+        return chunks
 
     def count(self) -> int:
         return len(self._chunks)

@@ -71,6 +71,10 @@ class AskResponse(BaseModel):
     # 意图判定通道: rule(规则快通道) | prototype(向量原型) | llm(兜底)；供评测看省了多少次 LLM
     intent_channel: str | None = None
     intent_score: float | None = None  # prototype 通道判定时的余弦分
+    # 检索 agent（有界 ReAct）：本问题是否用过、几步、走了哪些动作 —— 供评测与观测
+    agent_used: bool = False
+    agent_steps: int = 0
+    agent_actions: list[str] = Field(default_factory=list)
     # 缓存来源（供指标看板与前端反馈使用）
     cache_hit: bool = False
     cache_channel: str | None = None  # exact | semantic | identifier | miss | disabled

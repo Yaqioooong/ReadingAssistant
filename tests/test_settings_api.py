@@ -8,6 +8,7 @@ from langchain_core.embeddings import Embeddings
 
 import reading_assistant.api.routes.settings as settings_route
 from reading_assistant.api import create_app
+from reading_assistant.api.routes.settings import _mask_secret
 from reading_assistant.storage import (
     create_db_engine,
     create_session_factory,
@@ -53,11 +54,22 @@ def test_get_returns_groups_and_masks_secrets(tmp_path: Path) -> None:
             item for g in data['groups'] for item in g['items'] if item.get('type') == 'secret'
         ]
         assert secrets
+        # ⚠️ 不能断言「每个 secret 都被掩码」—— 未配置的 secret 掩码为 ''，
+        # 那样测试就依赖本机 .env 恰好填了值（2026-09-21 实际假失败过一次）。
+        # 这里只钉**契约**：已配置 → 掩码且短；未配置 → 空掩码。
         for item in secrets:
-            masked = item['state']['masked']
-            assert '••••' in masked
-            assert len(masked) < 32  # 只暴露前缀/尾号，绝非完整密钥
-            assert 'configured' in item['state']
+            state = item['state']
+            assert 'configured' in state
+            if state['configured']:
+                masked = state['masked']
+                assert '••••' in masked
+                assert len(masked) < 32  # 只暴露前缀/尾号，绝非完整密钥
+            else:
+                assert state['masked'] == ''
+        # 掩码形状本身由下面这条确定性单测负责（不依赖环境）
+        assert _mask_secret('sk-abcdefghijklmnop') == 'sk-••••••mnop'
+        assert _mask_secret('short') == '••••••'
+        assert _mask_secret('') == ''
 
 
 def test_put_unknown_key_returns_400(tmp_path: Path) -> None:
