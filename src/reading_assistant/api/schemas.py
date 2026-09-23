@@ -74,6 +74,7 @@ class AskResponse(BaseModel):
     # 检索 agent（有界 ReAct）：本问题是否用过、几步、走了哪些动作 —— 供评测与观测
     agent_used: bool = False
     agent_steps: int = 0
+    cqr_entities: list[str] = []  # 本轮指代消解并入的上文实体（空=未改写）
     agent_actions: list[str] = Field(default_factory=list)
     # 缓存来源（供指标看板与前端反馈使用）
     cache_hit: bool = False

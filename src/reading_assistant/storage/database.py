@@ -43,6 +43,13 @@ def init_db(engine: Engine) -> None:
     )
     _ensure_column(
         engine,
+        table='chat_sessions',
+        column='state',
+        ddl='ALTER TABLE chat_sessions ADD COLUMN state TEXT',
+    )
+    _purge_deprecated_summary(engine)
+    _ensure_column(
+        engine,
         table='documents',
         column='index_started_at',
         ddl='ALTER TABLE documents ADD COLUMN index_started_at TIMESTAMP',
@@ -60,6 +67,21 @@ def init_db(engine: Engine) -> None:
         ddl='ALTER TABLE hitl_tasks ADD COLUMN thread_id VARCHAR(64)',
     )
     _ensure_qa_cache_version_key(engine)
+
+
+def _purge_deprecated_summary(engine: Engine) -> None:
+    """清掉已废弃的滚动摘要列内容（收敛，不删列）。
+
+    迁移**每次启动都跑**，职责是把库收敛到目标形态 —— 不是「只在首次正确」。
+    留着非空的旧摘要是本项目最忌讳的形态：两处都在、没人知道该信哪个。
+    （前科：文档打回 indexing、前端未 rebuild、shell 旧 key 盖 .env。）
+    列本身不 DROP：用户有活库，破坏性操作要单独走。
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(text('UPDATE chat_sessions SET summary = NULL WHERE summary IS NOT NULL'))
+    except Exception:  # noqa: BLE001 表不存在或方言不支持时忽略
+        pass
 
 
 def _ensure_column(engine: Engine, table: str, column: str, ddl: str) -> None:

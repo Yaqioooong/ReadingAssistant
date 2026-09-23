@@ -239,10 +239,16 @@ class TestMultiTurnContext:
             assert len(rows) == 1, '重问应命中缓存而不是新增条目'
 
 
-class TestLongSessionSummary:
-    """M3 长会话：超过窗口后滚动增量摘要注入(更早对话摘要段)与落库。"""
+class TestLongSessionMemory:
+    """长会话记忆：token 预算的**原文**窗口 + 结构化状态（取代滚动摘要）。
 
-    def test_overflow_turns_trigger_incremental_summary(self, tmp_path: Path) -> None:
+    这里钉死的核心契约是 **记忆成本不随轮数增长**。
+    摘要方案正是死在「每轮一次 LLM + 每轮全量重写」上，所以
+    ``RouterLLM.summarize_calls`` 从「应当触发」翻转为「永不该触发」的哨兵。
+    """
+
+    def test_overflow_turns_never_summarize(self, tmp_path: Path) -> None:
+        """跑满超过旧窗口（6 条）的轮数：零摘要调用，且早期原文仍在窗口内。"""
         llm = RouterLLM()
         client, factory = _make_env(tmp_path, llm)
         with client:
@@ -252,21 +258,62 @@ class TestLongSessionSummary:
                 ('李四喜欢谁？', 2),
                 ('王五喜欢谁？', 1),
                 ('赵六喜欢谁？', 2),
-                ('张三喜欢谁？', 1),  # 重复首问 → 命中缓存,但触发摘要
+                ('孙七喜欢谁？', 1),
+                ('周八喜欢谁？', 2),
+                ('吴九喜欢谁？', 1),
             ]
             for q, doc in turns:
                 resp = _ask(client, sid, q, doc=doc)
                 assert resp['answer'], q
-            assert llm.summarize_calls >= 1, '消息超窗口后应触发滚动摘要'
-            assert any('更早对话摘要' in p for p in llm.prompts), 'gate/context prompt 应注入摘要段'
 
+            # 契约①：全程零摘要调用（7 轮 = 14 条消息，远超旧的 6 条窗口）
+            assert llm.summarize_calls == 0, '滚动摘要已废弃，不该再有任何摘要调用'
+            # 契约②：prompt 里不再出现摘要注入段
+            assert not any('更早对话摘要' in p for p in llm.prompts)
+
+            # 契约③：历史以**原文**回灌，早期轮次仍在（新窗口比 6 条大得多）
+            book_prompts = [p for p in llm.prompts if '原文片段' in p]
+            assert book_prompts, '应有书问题作答 prompt'
+            assert any('王五喜欢谁？' in p for p in book_prompts), '早期轮次原文应仍在窗口内'
+
+            # 契约④：历史问答（history 意图）照常工作
             early = _ask(client, sid, '我第一个问题是什么？')
             assert early['intent'] == 'history'
             assert early['answer'] and early['needs_clarification'] is False
 
+    def test_conversation_state_replaces_summary(self, tmp_path: Path) -> None:
+        """结构化状态落库：字段精确、turn_count 从消息表数出（幂等）。"""
+        llm = RouterLLM()
+        client, factory = _make_env(tmp_path, llm)
+        with client:
+            sid = client.post('/api/sessions').json()['session_id']
+            _ask(client, sid, '张三喜欢谁？', doc=1)
+            _ask(client, sid, '李四喜欢谁？', doc=2)
             with factory() as session:
                 chat = session.get(ChatSession, int(sid))
-                assert chat is not None and chat.summary, '摘要应落库'
-                data = json.loads(chat.summary)
-                assert isinstance(data, dict) and 'upto' in data and data['text']
-            assert early['answer']  # 历史轮次照常作答
+                assert chat is not None and chat.state, '结构化状态应落库'
+                state = json.loads(chat.state)
+
+        assert sorted(state['active_documents']) == ['d1.docx', 'd2.docx']
+        assert state['turn_count'] == 2, '从消息表数出，不是自增'
+        assert state['last_question'] == '李四喜欢谁？'
+        assert state['last_intent'] == 'book'
+
+    def test_state_survives_window_eviction(self, tmp_path: Path) -> None:
+        """窗口被挤出去之后，结构化状态仍记得「这场对话在谈哪本书」。
+
+        这正是摘要原本要承担、却会顺手把实体名压没的那件事。
+        """
+        llm = RouterLLM()
+        client, factory = _make_env(tmp_path, llm)
+        with client:
+            sid = client.post('/api/sessions').json()['session_id']
+            _ask(client, sid, '张三喜欢谁？', doc=1)
+            _ask(client, sid, '随便聊聊吧', doc=None)  # 非书问题，不产生 doc_titles
+            with factory() as session:
+                chat = session.get(ChatSession, int(sid))
+                state = json.loads(chat.state)
+            # 本轮没有检索结果 → active_documents 不得被清空（非空才覆盖）
+            assert state['active_documents'] == ['d1.docx']
+            # 且它确实被注入了作答 prompt
+            assert any('【本会话涉及书籍】' in p for p in llm.prompts)

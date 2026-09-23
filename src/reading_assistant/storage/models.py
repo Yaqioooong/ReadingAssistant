@@ -52,7 +52,10 @@ class ChatSession(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     title: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    summary: Mapped[str | None] = mapped_column(Text)  # 长会话滚动摘要 JSON:{upto, text}
+    # 已废弃：2026-09-22 起不再读写。滚动摘要被「token 预算原文窗口 + 结构化状态」取代，
+    # 见 graph/state.py。列保留但不再使用（不 DROP —— 用户有活库，破坏性操作要单独走）。
+    summary: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str | None] = mapped_column(Text)  # 会话结构化状态 JSON，见 graph/state.py
 
     messages: Mapped[list['ChatMessage']] = relationship(
         back_populates='session', cascade='all, delete-orphan'

@@ -1,10 +1,15 @@
-"""问答流水线：多轮上下文(滚动摘要) → 检索门 → 检索 → 回答 / HITL 澄清 → 记录。"""
+"""问答流水线：多轮上下文(原文窗口+结构化状态) → 检索门 → 检索 → 回答 / HITL 澄清 → 记录。
 
-import json
+多轮记忆见 ``graph/state.py`` 与 ``_select_window``：**零额外 LLM 成本**，
+取代了 2026-09-22 之前的「超出 6 条消息就滚动摘要」方案。
+"""
+
 import math
 import re
 import time
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from typing import TypedDict
 
 from langchain_core.embeddings import Embeddings
@@ -24,12 +29,17 @@ from reading_assistant.graph.agent import (
     run_agent_loop,
 )
 from reading_assistant.graph.intent import build_prototype_router, route_fast
+from reading_assistant.graph.rewrite import resolve_query as resolve_coreference
+from reading_assistant.graph.state import (
+    load_conversation_state,
+    merge_state,
+    save_conversation_state,
+)
 from reading_assistant.model.factory import get_chat_model, get_embedding_model
 from reading_assistant.rag import create_retriever
 from reading_assistant.rag.retriever import _identifier_tokens
 from reading_assistant.storage import (
     ChatMessage,
-    ChatSession,
     Document,
     create_hitl_task,
     get_document,
@@ -68,13 +78,14 @@ class QAState(TypedDict, total=False):
     cache_hit: bool
     question_hash: str | None
     question_embedding: list[float] | None
-    history: list[dict] | None  # 最近对话轮次(user/assistant 交错、时间正序,不含本轮)
+    history: list[dict] | None  # 最近对话**原文**窗口(时间正序, 按 token 预算截取, 不含本轮)
+    conv_state: dict | None  # 会话结构化状态(替代滚动摘要, 见 graph/state.py)
+    resolved_question: str | None  # 指代消解后的**检索/缓存**查询（无改写时等于 question）
+    cqr_entities: list[str] | None  # 本轮改写并入的上文实体（供观测/评测）
     intent: str | None  # gate 分类结果: book | history | chat
-    summary: str | None  # 长会话滚动摘要文本(较早轮次已压缩)
     cache_channel: str | None  # exact | semantic | identifier | miss | disabled
     cache_similarity: float | None  # 语义/标识符命中时的相似度
     cache_invalidated: bool  # 是否丢弃过"信息不足式"脏缓存
-    summary_pending: dict | None  # summarize 增量任务: {upto, anchor, text}
     intent_channel: str | None  # 意图判定通道: rule | prototype | llm(供观测/评测)
     intent_score: float | None  # L2 原型判定时的余弦分(仅观测)
     intent_embedding: list[float] | None  # L2 算出的问题向量, 供 cache_check 复用免重复 embedding
@@ -123,7 +134,7 @@ def _build_answer_prompt(
     clarification: str | None = None,
     doc_titles: dict[int, str] | None = None,
     history: list[dict] | None = None,
-    summary: str | None = None,
+    conv_state: dict | None = None,
 ) -> str:
     labeled: list[str] = []
     for index, chunk in enumerate(chunks, start=1):
@@ -134,15 +145,20 @@ def _build_answer_prompt(
         context = '\n\n'.join(labeled)
     else:
         context = '（未检索到相关原文片段）'
-    lines = [
-        '你是阅读助手。请仅根据下方"原文片段"回答问题，不要使用外部知识。',
-        f'问题：{question}',
-    ]
+    # ⚠️ 顺序即缓存。把**每轮都变**的部分（问题、原文片段）放到后面：
+    # 历史是追加式增长的，第 N 轮的历史文本是第 N+1 轮的**字面前缀**，
+    # 于是 prefix cache 能覆盖「系统提示 + 全部历史」这一段。
+    # 反过来（问题在前）等于每轮都从问题那一点起让缓存失效 —— 摘要方案正是这么干的。
+    lines = ['你是阅读助手。请仅根据下方"原文片段"回答问题，不要使用外部知识。']
     if history:
-        header = '【最近对话（仅用于理解指代与追问，回答事实以原文片段为准）】\n'
-        lines.append(header + _render_history(history))
-    if summary:
-        lines.append(_summary_section(summary))
+        lines.append(
+            '【最近对话（仅用于理解指代与追问，回答事实以原文片段为准）】\n'
+            + _render_history(history)
+        )
+    state_block = _state_section(conv_state)
+    if state_block:
+        lines.append(state_block)
+    lines.append(f'问题：{question}')
     if clarification:
         lines.append(f'用户补充说明：{clarification}')
     lines.extend(
@@ -175,67 +191,109 @@ def _build_answer_prompt(
 
 
 # ---- 多轮上下文：历史渲染 / 检索门 / 非检索作答 ----
-HISTORY_TURNS = 6  # 读回的最近消息条数（user+assistant 合计）
-_RENDER_MSG_CAP = 240  # 单条历史渲染上限，控制 prompt 长度
+_HISTORY_ROLE_OVERHEAD = 4  # 「用户：」这类角色前缀的粗略 token 开销
 
 
-def _render_history(history: list[dict] | None, cap: int = _RENDER_MSG_CAP) -> str:
-    """把对话记录渲染成多行文本（时间正序）；供注入 prompt。"""
+@lru_cache(maxsize=1)
+def _token_encoder():
+    """缓存的 tiktoken 编码器；不可用时返回 None（调用方降级为字符近似）。
+
+    必须缓存：``get_encoding`` 每次构造都有真实开销，逐条消息重造会拖慢每个请求。
+    """
+    try:
+        import tiktoken
+
+        return tiktoken.get_encoding('cl100k_base')
+    except Exception:  # noqa: BLE001 —— 离线/无缓存文件时不能让整条问答链路挂掉
+        logger.warning('tiktoken 不可用，历史窗口降级为字符近似（保守上界）')
+        return None
+
+
+def _count_tokens(text: str) -> int:
+    """估算 token 数。降级时用字符数 —— 中文场景下它是有余量的上界，不会低估。"""
+    encoder = _token_encoder()
+    if encoder is None:
+        return len(text)
+    return len(encoder.encode(text, disallowed_special=()))
+
+
+def _clip_tokens(text: str, cap: int) -> str:
+    """按 token 截断；未超限则原样返回。"""
+    if cap <= 0:
+        return text
+    encoder = _token_encoder()
+    if encoder is None:
+        return text if len(text) <= cap else text[:cap] + '…'
+    tokens = encoder.encode(text, disallowed_special=())
+    if len(tokens) <= cap:
+        return text
+    return encoder.decode(tokens[:cap]) + '…'
+
+
+def _select_window(rows: list[tuple[str, str]], budget: int) -> list[dict]:
+    """从**最新**往回整条累积，直到「再加一条就超预算」为止。
+
+    刻意不做半条截断：保留的都是完整消息，语义可预测、可断言、易测。
+    返回时间正序（最早在前），与 ``_render_history`` 的期望一致。
+
+    ⚠️ 最新一条**无条件保留**（哪怕它自己就超预算）：
+    否则一条长回答会把窗口清成空的，等于把「刚说过什么」整个丢掉 ——
+    单条长度另有 ``history_msg_token_cap`` 兜底，不会失控。
+    """
+    picked: list[dict] = []
+    used = 0
+    for role, content in reversed(rows):
+        cost = _count_tokens(str(content or '')) + _HISTORY_ROLE_OVERHEAD
+        if picked and used + cost > budget:
+            break
+        used += cost
+        picked.append({'role': role, 'content': content})
+    picked.reverse()
+    return picked
+
+
+def _render_history(history: list[dict] | None, cap: int | None = None) -> str:
+    """把对话记录渲染成多行文本（时间正序）；供注入 prompt。
+
+    单条内容按 ``history_msg_token_cap`` 个 **token** 截断，不再按字符数 ——
+    中文里字符与 token 差得远，按字符截会在长回答上过早砍掉信息，
+    而这里要的恰恰是「窗口内尽量无损」。
+    """
     if not history:
         return ''
+    limit = cap if cap is not None else get_settings().history_msg_token_cap
     lines = []
     for msg in history:
         role = '用户' if msg.get('role') == 'user' else '助手'
-        content = str(msg.get('content') or '')
-        if len(content) > cap:
-            content = content[:cap] + '…'
+        content = _clip_tokens(str(msg.get('content') or ''), limit)
         lines.append(f'{role}：{content}')
-    logger.info('rendered history:%s', lines)
+    # 不再打印整段历史：窗口从 6 条放大到千级 token 后，逐字打日志会淹掉真正的信号。
+    logger.info('rendered history:%d msgs', len(lines))
     return '\n'.join(lines)
 
 
-def _load_summary(session: Session, sid: int) -> dict | None:
-    """读取会话滚动摘要 JSON：{'upto': 已摘要到消息 id, 'text': 摘要文本}。"""
-    chat = session.get(ChatSession, sid)
-    if chat is None or not chat.summary:
-        return None
-    try:
-        data = json.loads(chat.summary)
-        return data if isinstance(data, dict) else None
-    except (ValueError, TypeError):
-        return None
+def _state_section(conv_state: dict | None) -> str:
+    """结构化会话状态注入段（取代原「更早对话摘要」注入段）。
 
-
-def _summary_section(summary: str | None) -> str:
-    """「更早对话摘要」注入段：有则返回，无则空串。"""
-    if not summary:
+    与摘要的关键差别：字段精确、可判定，不是散文。
+    且在原文窗口把早期轮次挤出去之后，它**仍然记得这场对话在谈哪本书** ——
+    这正是摘要原本要承担、却会顺手把实体名压没的那件事。
+    """
+    if not conv_state:
         return ''
-    return '【更早对话摘要（较早轮次已压缩，仅供参考；细节以最近对话原文为准）】\n' + summary
-
-
-def _build_summary_prompt(current: str | None, pending_text: str) -> str:
-    """滚动摘要 prompt：把新滚出窗口的对话并入既有摘要，只输出新摘要文本。"""
-    lines = [
-        '对话摘要任务：将“待压缩对话”并入既有摘要，生成一份更新后的对话摘要。',
-        '要求：以“用户问过的问题”为主线，保留问题与关键结论；不要编造细节；只输出摘要正文。',
-    ]
-    if current:
-        lines.append(f'【既有摘要】\n{current}')
-    lines.extend(
-        [
-            f'【待压缩对话】\n{pending_text}',
-            '更新后的摘要：',
-        ]
-    )
-    return '\n\n'.join(lines)
-
-
+    docs = [str(d) for d in (conv_state.get('active_documents') or []) if d]
+    if not docs:
+        return ''
+    return '【本会话涉及书籍】' + '、'.join(docs)
 def _build_gate_prompt(
     question: str,
     history: list[dict] | None,
-    summary: str | None = None,
 ) -> str:
-    """检索门 prompt：只让模型输出一个意图词，决定本轮是否检索书籍。"""
+    """检索门 prompt：只让模型输出一个意图词，决定本轮是否检索书籍。
+
+    刻意**不注入**会话状态/摘要：这一层的职责只是分意图，多喂上下文只会让边界更糊
+    —— 本项目已经修过一次「元问题外壳 + 书内容内核」被误判。
+    """
     parts = [
         '意图分类任务：判断下面这条用户提问是否需要检索书籍内容，只输出一个词：',
         '- history：用户在查询“我问过/说过什么”这类**会话记录本身**'
@@ -250,8 +308,6 @@ def _build_gate_prompt(
     ]
     if history:
         parts.append(f'【最近对话】\n{_render_history(history)}')
-    if summary:
-        parts.append(_summary_section(summary))
     parts.append(f'【当前提问】\n{question}')
     parts.append('只输出 book / history / chat 中的一个词：')
     return '\n'.join(parts)
@@ -260,9 +316,10 @@ def _build_gate_prompt(
 def _build_context_prompt(
     question: str,
     history: list[dict] | None,
-    summary: str | None = None,
+    conv_state: dict | None = None,
 ) -> str:
     """history/chat 分支作答 prompt：不检索书籍，仅按对话记录作答。"""
+    state_block = _state_section(conv_state)
     return (
         '你是阅读助手。当前用户提问属于对本次对话本身的询问或日常寒暄，'
         '不需要检索书籍内容。\n'
@@ -271,7 +328,7 @@ def _build_context_prompt(
         '必须按记录原文作答，不得编造记录中不存在的内容。\n'
         '2. 若对话记录中没有相关内容，如实说明。\n'
         '3. 若是寒暄（你好/谢谢/你是谁等），礼貌简短回应即可。\n\n'
-        + (_summary_section(summary) + '\n\n' if summary else '')
+        + (state_block + '\n\n' if state_block else '')
         + '【对话记录】\n'
         f'{_render_history(history)}\n\n'
         '【当前提问】\n'
@@ -378,11 +435,81 @@ def _document_content_hash(session: Session, document_id: int | None) -> str:
     return document.content_hash if document else ''
 
 
+def _effective_question(state: QAState) -> str:
+    """本轮用于**检索与缓存**的问题文本（指代消解后）。
+
+    ⚠️ 刻意与 ``state['question']`` 分开：
+    - ``question`` 是**用户原话** —— 要记进对话记录、要拿去做意图分类
+      （分类的是「用户说了什么」）。
+    - ``effective`` 是**在问什么** —— 检索与缓存只关心这个。
+
+    两者在含代词的追问轮上**必须**不同。否则同一条字面问题「它的特点是什么？」
+    在「寅将军」和「白骨精」两个上下文里会算出同一个 question_hash →
+    **直接命中对方的缓存、返回错误答案**（这是引入改写前就存在的隐患，
+    只是当时没有改写、问题被「检索不到」掩盖了）。
+    """
+    return state.get('resolved_question') or state['question']
+
+
 def _full_question_text(question: str, clarification: str | None) -> str:
     """租种与retrieve节点一致的完整问题文本（含补充说明）"""
     if clarification:
         return f'{question}\n补充说明：{clarification}'
     return question
+
+
+_ACTIVE_DOCUMENTS_CAP = 8  # 会话状态里记住的书名上限
+
+
+def _merge_active_documents(prev: list[str], current: list[str]) -> list[str]:
+    """把本轮涉及的书并入已记住的书（去重保序，超出上限丢最早的）。
+
+    刻意**累积**而不是每轮替换：「当前话题」一换书就会把上一本抹掉，
+    而这个字段存在的意义恰恰是**承接被原文窗口挤掉的上下文** ——
+    换掉就成了它本该替代的那个摘要的老毛病（记不住更早的事）。
+
+    用上限而非无限增长：有界是这套记忆的硬要求。
+    """
+    merged = list(prev)
+    for name in current:
+        if name and name not in merged:
+            merged.append(name)
+    return merged[-_ACTIVE_DOCUMENTS_CAP:]
+
+
+def _persist_conversation_state(session: Session, sid: int, state: QAState) -> None:
+    """把本轮已有信号**确定性地**并入会话状态并落库。零 LLM 成本。
+
+    这是本模块和滚动摘要的根本分野：模型不参与记忆的生成，
+    它产出的普通信号（检索到哪些书、判成什么意图）被代码合并成状态。
+
+    ⚠️ 幂等要求：``record`` 在 ``interrupt()`` 恢复链路上有重跑可能，因此
+    **不许自增计数器** —— ``turn_count`` 一律从消息表数出来；
+    其余字段都是「本轮输入的函数」，重跑得到同一个值。
+    """
+    prev = load_conversation_state(session, sid)
+    doc_titles = state.get('doc_titles') or {}
+    merged_docs = _merge_active_documents(
+        list(prev.active_documents) if prev else [],
+        list(dict.fromkeys(doc_titles.values())),  # 去重保序
+    )
+    turn_count = (
+        session.scalar(
+            select(func.count(ChatMessage.id)).where(
+                ChatMessage.session_id == sid,
+                ChatMessage.role == 'user',
+            )
+        )
+        or 0
+    )
+    patch = {
+        'active_documents': merged_docs,
+        'last_question': state.get('question'),
+        'last_intent': state.get('intent'),
+        'pending_clarification': state.get('clarification'),
+        'turn_count': turn_count,
+    }
+    save_conversation_state(session, sid, merge_state(prev, patch))
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -468,8 +595,11 @@ def build_qa_graph(
         settings = get_settings()
         if not settings.cache_enabled:
             return {'cache_hit': False, 'question_hash': None, 'cache_channel': 'disabled'}
+        effective_question = _effective_question(state)
+        # 缓存键必须用**改写后**的问题：同一条「它的特点是什么？」在不同上文里
+        # 是不同的提问，共用一条缓存会直接返回错误答案。
         question_hash = sha256_hex(
-            normalize_question(state['question'])
+            normalize_question(effective_question)
             + '|'
             + normalize_question(state.get('clarification') or '')
             + '|'
@@ -490,7 +620,9 @@ def build_qa_graph(
                     )
                     if embedding is None:
                         embedding = retriever.embed(
-                            _full_question_text(state['question'], state.get('clarification')),
+                            _full_question_text(
+                                _effective_question(state), state.get('clarification')
+                            ),
                         )
                     best_entry, best_score = None, 0.0
                     id_entry, id_score = None, 0.0
@@ -506,7 +638,7 @@ def build_qa_graph(
                             and cand.answer
                             and cand.citations
                             and _identifier_tokens(cand.question_raw or '')
-                            & _identifier_tokens(state['question'])
+                            & _identifier_tokens(effective_question)
                         ):
                             id_score, id_entry = score, cand
                     satisfied = False
@@ -610,7 +742,9 @@ def build_qa_graph(
         }
 
     def retrieve(state: QAState) -> dict:
-        question = state['question']
+        # 用**指代消解后**的查询检索：「它的特点是什么？」在这里变成
+        # 「它的特点是什么？（上文相关实体：… 寅将军）」，否则「它」对检索器就是空气。
+        question = _effective_question(state)
         if state.get('clarification'):
             question = f'{question}\n补充说明：{state["clarification"]}'
         doc_ids = state.get('document_ids') or []
@@ -677,7 +811,7 @@ def build_qa_graph(
 
         与「重跑」的本质区别：挂起时状态留在 checkpoint 里，恢复时从本节点继续，
         ``retrieve`` 用的是**本次会话真实的** document_ids / 历史 / 已算好的向量，
-        不需要客户端重发问题、也不会把 gate/context_load/summarize 重付一遍。
+        不需要客户端重发问题、也不会把 context_load/gate 重付一遍。
 
         ⚠️ ``interrupt()`` 恢复时**本节点从头重跑**（LangGraph 用重放重建入口状态），
         所以 ``interrupt()`` 之前的一切副作用都必须幂等 —— 见
@@ -719,8 +853,8 @@ def build_qa_graph(
                 doc_id = state.get('document_id')
                 save_qa_cache_entry(
                     session,
-                    question_raw=state['question'],
-                    question_normalized=normalize_question(state['question']),
+                    question_raw=_effective_question(state),
+                    question_normalized=normalize_question(_effective_question(state)),
                     question_hash=state['question_hash'],
                     answer=None,
                     needs_clarification=True,
@@ -765,7 +899,7 @@ def build_qa_graph(
             clarification=state.get('clarification'),
             doc_titles=state.get('doc_titles'),
             history=state.get('history') or None,
-            summary=state.get('summary') or None,
+            conv_state=state.get('conv_state'),
         )
         start = time.perf_counter()
         tool_calls = []
@@ -833,8 +967,8 @@ def build_qa_graph(
                 doc_id = state.get('document_id')
                 save_qa_cache_entry(
                     session,
-                    question_raw=state['question'],
-                    question_normalized=normalize_question(state['question']),
+                    question_raw=_effective_question(state),
+                    question_normalized=normalize_question(_effective_question(state)),
                     question_hash=state['question_hash'],
                     answer=content,
                     citations=citations,
@@ -868,11 +1002,12 @@ def build_qa_graph(
     def record(state: QAState) -> dict:
         if not state.get('session_id'):
             return {}
+        sid = state['session_id']
         with session_scope(session_factory) as session:
             if state.get('answer'):
                 session.add(
                     ChatMessage(
-                        session_id=state['session_id'],
+                        session_id=sid,
                         role='assistant',
                         content=state['answer'],
                         meta={
@@ -882,6 +1017,9 @@ def build_qa_graph(
                         },
                     )
                 )
+            # 会话结构化状态：**零 LLM 成本**地从本轮已有信号派生。
+            # 放在已有的写节点里，不新增节点 —— interrupt() 恢复时新节点会引入非幂等副作用。
+            _persist_conversation_state(session, sid, state)
         return {}
 
     # 构图期确定：模型是否支持工具调用（测试里的 fake LLM 多数只有 invoke）
@@ -951,7 +1089,7 @@ def build_qa_graph(
         run = run_agent_loop(
             model=chat_model,
             toolbox=toolbox,
-            question=state['question'],
+            question=_effective_question(state),
             history=state.get('history'),
             budget=budget,
             seed_chunks=state.get('chunks') or None,
@@ -1025,95 +1163,65 @@ def build_qa_graph(
         return 'retrieve' if state.get('clarification') else 'record'
 
     def context_load(state: QAState) -> dict:
-        """读回最近对话 + 长会话滚动摘要任务（时间正序，不含本轮）。"""
+        """读回最近**原文**窗口（token 预算）+ 会话结构化状态（时间正序，不含本轮）。
+
+        ⚠️ 本节点**只读**：它跑在 ``record_question`` 之前，而 ``interrupt()``
+        恢复时节点会从头重跑 —— 这里绝不能有任何副作用。
+        """
         sid = state.get('session_id')
         if not sid:
-            # 如果非本轮会话，则无上下文
-            return {'history': [], 'summary': None, 'summary_pending': None}
+            # 无会话（如 MCP 工具调用）→ 无上下文
+            return {'history': [], 'conv_state': None}
+        settings = get_settings()
         with session_scope(session_factory) as session:
-            # 查询本session最近HISTORY_TURNS轮对话内容，order by 会话内容id 倒排；最新的对话在前面
             rows = list(
                 session.scalars(
                     select(ChatMessage)
                     .where(ChatMessage.session_id == sid)
                     .order_by(ChatMessage.id.desc())
-                    .limit(HISTORY_TURNS)
+                    .limit(settings.history_max_messages)
                 )
             )
-            # 倒序一下，按时间顺序排
             rows.reverse()  # 时间正序（最早在前）
-            # 计算本轮对话一共多少条对话内容
-            total = (
-                session.scalar(
-                    select(func.count(ChatMessage.id)).where(ChatMessage.session_id == sid)
-                )
-                or 0
+            history = _select_window(
+                [(m.role, m.content) for m in rows],
+                settings.history_token_budget,
             )
-            truncated = total > len(rows)  # 判断是否被截断，即对话内容超出HISTORY_TURNS
-            summary_text = None
-            pending = None
-            if truncated:
-                anchor = rows[0].id  # 锚点，窗口内最早一条消息 id
-                logger.info('anchor:%d', anchor)
-                stored = _load_summary(session, sid)  # 获取本轮对话的总结摘要
-                if stored:
-                    summary_text = stored.get('text')
-                upto = int((stored or {}).get('upto') or 0)
-                logger.info('upto:%d', upto)
-
-                if anchor - 1 > upto:
-                    # 增量：仅摘要 (upto, anchor-1] 区间内滚出窗口的消息
-                    old_rows = list(
-                        session.scalars(
-                            select(ChatMessage)
-                            .where(
-                                ChatMessage.session_id == sid,
-                                ChatMessage.id > upto,
-                                ChatMessage.id <= anchor - 1,
-                            )
-                            .order_by(ChatMessage.id)
-                        )
-                    )
-                    pending = {
-                        'upto': upto,
-                        'anchor': anchor,
-                        'text': _render_history(
-                            [{'role': m.role, 'content': m.content} for m in old_rows], cap=160
-                        ),
-                    }
+            conv_state = load_conversation_state(session, sid)
+        logger.info(
+            '问答[上下文] 原文窗口 %d 条（预算 %d token，取回 %d 条）',
+            len(history), settings.history_token_budget, len(rows),
+        )
         return {
-            'history': [{'role': m.role, 'content': m.content} for m in rows],
-            'summary': summary_text,
-            'summary_pending': pending,
+            'history': history,
+            # 落成纯 dict 进 state：LangGraph checkpoint 序列化对非基础类型很敏感
+            # （本项目已被 numpy 标量坑过一次）。
+            'conv_state': asdict(conv_state) if conv_state else None,
         }
 
-    def summarize(state: QAState) -> dict:
-        """长会话增量摘要：把新滚出窗口的消息并入既有摘要并落库。"""
-        pending = state.get('summary_pending')
-        if not pending:
-            return {'summary': state.get('summary')}
-        current = state.get('summary') or ''
-        prompt = _build_summary_prompt(current, pending.get('text') or '')
-        text = current
-        start = time.perf_counter()
-        try:
-            resp = chat_model.invoke(prompt)
-            candidate = (getattr(resp, 'content', None) or str(resp)).strip()
-            if candidate:
-                text = candidate
-        except Exception:
-            logger.exception('问答[摘要] 生成异常，沿用旧摘要')
-        cost_ms = (time.perf_counter() - start) * 1000
-        with session_scope(session_factory) as session:
-            chat = session.get(ChatSession, state.get('session_id'))
-            if chat is not None:
-                chat.summary = json.dumps(
-                    {'upto': pending['anchor'] - 1, 'text': text}, ensure_ascii=False
-                )
-        logger.info(
-            '问答[摘要] 增量 upto=%d chars=%d (%.0fms)', pending['anchor'] - 1, len(text), cost_ms
+    def resolve_query(state: QAState) -> dict:
+        """指代消解：把含代词的追问改写成自带实体的查询（CQR，见 graph/rewrite.py）。
+
+        位置有两处是**硬要求**：
+        1. 必须在 ``context_load`` 之后 —— 要拿 ``history`` 才有上文实体可抽。
+        2. 必须在 ``cache_check`` 之前 —— 缓存键要用改写后的查询，否则同一句
+           「它的特点是什么？」在两个不同上文里会共用缓存、**返回错误答案**。
+
+        ⚠️ 纯函数、零 LLM。``interrupt()`` 之前的节点不重放，``resolved_question``
+        直接读回；但即便重跑也必须得到同一结果 —— 非确定性改写会让重放产生不同查询。
+        """
+        question = state['question']
+        resolved, entities = resolve_coreference(
+            question,
+            state.get('history'),
+            enabled=get_settings().cqr_enabled,
+            max_entities=get_settings().cqr_max_entities,
         )
-        return {'summary': text}
+        if resolved == question:
+            # 无改写 → 留 None 让 _effective_question 回落原话（不复制一份冗余字符串）
+            return {'resolved_question': None, 'cqr_entities': None}
+        return {'resolved_question': resolved, 'cqr_entities': entities}
+
 
     def gate(state: QAState) -> dict:
         """检索门：只要在会话里就分类本轮意图(含第一问)；无会话(如 MCP 工具调用)直接 book。
@@ -1132,10 +1240,13 @@ def build_qa_graph(
         settings = get_settings()
 
         # ---- L1/L2 快通道：命中即出意图，零 LLM 调用 ----
+        # 规则层与 L3 看的都是**用户原话**（意图分类判的是「用户说了什么」）；
+        # 但 L2 算出的向量会被 cache_check 复用来做语义缓存比对，
+        # 而缓存里存的是**改写后**的问题向量 —— 两者必须同一口径，故这里嵌 effective。
         decision = route_fast(
             question,
             prototype_router,
-            lambda: retriever.embed(question),
+            lambda: retriever.embed(_effective_question(state)),
             rules_enabled=settings.intent_rules_enabled,
         )
         if decision.intent:
@@ -1156,7 +1267,7 @@ def build_qa_graph(
 
         # ---- L3 LLM 兜底：只处理前两层拿不准的余量 ----
         raw = None
-        prompt_text = _build_gate_prompt(question, state.get('history'), state.get('summary'))
+        prompt_text = _build_gate_prompt(question, state.get('history'))
         start_ts = time.perf_counter()
         try:
             resp = chat_model.invoke(prompt_text)
@@ -1187,7 +1298,9 @@ def build_qa_graph(
     def context_answer(state: QAState) -> dict:
         """history/chat 分支：不检索书籍，仅凭对话记录/寒暄作答；结果写回记录。"""
         question = state['question']
-        prompt = _build_context_prompt(question, state.get('history') or [], state.get('summary'))
+        prompt = _build_context_prompt(
+            question, state.get('history') or [], state.get('conv_state')
+        )
         content = ''
         response = None
         try:
@@ -1238,14 +1351,14 @@ def build_qa_graph(
     graph.add_node('record', record)
     graph.add_node('record_question', record_question)
     graph.add_node('context_load', context_load)
-    graph.add_node('summarize', summarize)
+    graph.add_node('resolve_query', resolve_query)
     graph.add_node('gate', gate)
     graph.add_node('context_answer', context_answer)
 
     graph.add_edge(START, 'context_load')
-    graph.add_edge('context_load', 'record_question')
-    graph.add_edge('record_question', 'summarize')
-    graph.add_edge('summarize', 'gate')
+    graph.add_edge('context_load', 'resolve_query')
+    graph.add_edge('resolve_query', 'record_question')
+    graph.add_edge('record_question', 'gate')
     graph.add_conditional_edges(
         'gate',
         route_after_gate,

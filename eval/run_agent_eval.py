@@ -47,7 +47,7 @@ def _build_env():
         init_db,
         list_documents,
     )
-    from reading_assistant.storage.models import ChatSession, Document
+    from reading_assistant.storage.models import Document
 
     with get_session_factory()() as session:
         real_docs = [
@@ -59,7 +59,6 @@ def _build_env():
     init_db(engine)
     factory = create_session_factory(engine)
     with factory() as session:
-        session.add(ChatSession(id=1))
         for doc_id, filename, content_hash, status in real_docs:
             session.add(Document(
                 id=doc_id, filename=filename, title=filename[:40],
@@ -71,21 +70,33 @@ def _build_env():
 
 
 def _ask(factory, vector_store, question: str, history: list[dict] | None, thread: str) -> dict:
-    from reading_assistant.graph.qa import build_qa_graph
-    from reading_assistant.storage import create_session_factory  # noqa: F401
-    from reading_assistant.storage.models import ChatMessage
+    """跑一题。**每题一个独立会话**（见下）。
 
-    if history:
-        with factory() as session:
-            for message in history:
-                session.add(ChatMessage(
-                    session_id=1, role=message['role'], content=message['content'],
-                ))
-            session.commit()
+    ⚠️ 曾经所有用例共用 ``ChatSession(id=1)``，于是 gold 的 per-case ``history``
+    会往同一个会话里累加 —— 上一题的上下文泄漏进下一题。
+    后果实测（2026-09-22）：``ag-pronoun-01`` 把「寅将军」写进历史后，
+    ``ag-pronoun-02``（gold 期望「孙悟空」）拿到的历史里多了「寅将军」，
+    agent 遂把「他」当成寅将军、去第十三回找「收服」，必然答错。
+    而 gold 给每题单独写 ``history`` 就是要**控制**上下文，泄漏直接废掉了这个控制。
+    改用独立会话后，每题的上下文才等于 gold 声明的那一段。
+    """
+    from reading_assistant.graph.qa import build_qa_graph
+    from reading_assistant.storage.models import ChatMessage, ChatSession
+
+    with factory() as session:
+        chat = ChatSession()
+        session.add(chat)
+        session.commit()
+        session_id = chat.id
+        for message in (history or []):
+            session.add(ChatMessage(
+                session_id=session_id, role=message['role'], content=message['content'],
+            ))
+        session.commit()
 
     graph = build_qa_graph(factory, vector_store)
     return graph.invoke(
-        {'question': question, 'session_id': 1, 'document_ids': [DOC_ID]},
+        {'question': question, 'session_id': session_id, 'document_ids': [DOC_ID]},
         config={'configurable': {'thread_id': thread}},
     )
 

@@ -249,6 +249,19 @@ class Settings(BaseSettings):
     agent_enabled: bool = True
     agent_max_steps: int = 6  # 单题 agent 的 LLM 轮数硬上限（防失控成本）
 
+    # --- 多轮上下文：原文窗口（token 预算）+ 会话结构化状态 ---
+    # 取代原「超出 6 条消息就滚动摘要」方案。理由：原文无损且能吃 prefix cache，
+    # 而摘要每轮一次 LLM、且位于 prompt 前缀会主动让缓存失效 —— 更贵且有损。
+    history_token_budget: int = 4000  # 历史原文窗口总预算（token）
+    history_msg_token_cap: int = 800  # 单条历史消息上限（token），防一条长回答吃掉整个窗口
+    history_max_messages: int = 200  # 单次最多从库里取回的消息条数（规模护栏，不参与截断语义）
+
+    # --- 对话式查询改写（CQR：指代消解，见 graph/rewrite.py）---
+    # 目标：让「它的特点是什么？」在检索前变成自带实体的查询。
+    # 代词检测 + 实体抽取都是确定性规则，**零新增 LLM 调用**。
+    cqr_enabled: bool = True  # 含代词的追问是否消解成自带实体的查询
+    cqr_max_entities: int = 4  # 最多并入几个上文实体（多候选容错，见 rewrite.py 模块说明）
+
     @property
     def chroma_persist_path(self) -> Path:
         """向量库持久化目录（仓库根目录下）。"""
