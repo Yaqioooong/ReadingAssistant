@@ -547,3 +547,140 @@ def test_merge_backfills_with_agent_when_originals_are_short() -> None:
     assert len(out) == 10, '应把名额填满'
     assert sum(1 for c in out if c['chunk_id'].startswith('or-')) == 2
     assert sum(1 for c in out if c['chunk_id'].startswith('ag-')) == 8
+
+
+# ------------------------------------- B：反漂移护栏（2026-09-24 实测失败）
+
+def _broad_store() -> InMemoryVectorStore:
+    """50 条含「女子」的块 —— 复现 `grep '女子'` 的过宽现场。
+
+    真实库实测值（全书 1520 块）：'人' 1315 / '妖怪' 170 / '女子' 59，
+    而正常定位用的 '山坡下' 21 / '路旁闪出' 2 / '白骨夫人' 2。
+    阈值 `_BROAD_GREP_MAX_HITS = 40` 就是按这两组分开定的。
+    """
+    store = InMemoryVectorStore()
+    store.add([
+        StoredChunk(
+            id=f'doc7-broad-{i}',
+            text=f'第{i}处：路旁闪出一个女子。',
+            metadata={'document_id': DOC_ID, 'chapter_index': 100 + i,
+                      'chapter': f'第{100 + i}回 测试回目'},
+        )
+        for i in range(50)
+    ])
+    return store
+
+
+def test_grep_warns_when_a_single_term_is_too_broad() -> None:
+    """过宽词要被点出来，但**只提示、不拒绝、不改片段**。
+
+    失败现场：agent 拿 `grep '女子'`（59 条）当定位词，白骨精那一回（idx 32）
+    由此混进来，随后 6 步预算全烧在它上面，正解（idx 61）从头到尾没被读到。
+    """
+    result = _toolbox(_broad_store()).call('grep', {'term': '女子'})
+    assert '⚠️' in result.observation
+    assert '过宽' in result.observation
+    assert result.chunks, '只加提示，不能把返回的片段清空（否则等于拒绝执行、白吃一步预算）'
+
+
+def test_grep_does_not_warn_on_a_narrow_term() -> None:
+    """窄词不得误伤 —— '寅将军' 只命中 1 条。"""
+    result = _toolbox().call('grep', {'term': '寅将军'})
+    assert '⚠️' not in result.observation
+
+
+def test_grep_broadness_is_judged_per_term_not_by_sum() -> None:
+    """多词一起查时按**单个词**判断，不能拿合计。
+
+    否则「一次给几个候选名比较先后」这个正常用法（A/B 类题的标准流程）会被误伤：
+    几个各 20 余条的窄词合计就过线了。
+    """
+    store = InMemoryVectorStore()
+    store.add([
+        StoredChunk(
+            id=f'doc7-mix-{side}-{i}',
+            text=f'测试文本 {side}号词 {i}',
+            metadata={'document_id': DOC_ID, 'chapter_index': 200 + i,
+                      'chapter': f'第{200 + i}回 测试回目'},
+        )
+        for side in ('甲', '乙')
+        for i in range(25)
+    ])
+    result = _toolbox(store).call('grep', {'term': '甲号词,乙号词'})
+    assert '⚠️' not in result.observation, (
+        '合计 50 条 > 阈值，但每个词只有 25 条 —— 按合计判会误伤多候选枚举'
+    )
+
+
+def test_grep_tells_the_model_to_look_at_the_next_chapter() -> None:
+    """邻接原则：实体名常在紧邻的下一回开头点明，不要为此重新自由检索。"""
+    result = _toolbox().call('grep', {'term': '寅将军'})
+    assert '下一回' in result.observation
+
+
+def test_read_chapter_points_at_the_next_chapter() -> None:
+    """read_chapter 必须给出**确定**的下一回 chapter_index。
+
+    失败现场：agent 手里有 idx 60（只写「路旁又闪出一个女子」，没给名字），
+    而正解在 **idx 61**（下一回开头，沙僧道「是一个女子，弄阵旋风，把师父摄了去也」）。
+    离答案只差一步「读下一章」，却回头自由检索、预算耗尽。
+    """
+    result = _toolbox().call('read_chapter', {'chapter_index': 13})
+    assert '下一回' in result.observation
+    assert 'chapter_index=40' in result.observation
+
+
+def test_read_chapter_still_works_without_chapter_index_table(monkeypatch) -> None:
+    """邻接提示是**增强项**：取不到章节表时只能静默降级，不能让正文不可用。"""
+    store = _store()
+
+    def _boom(document_id):  # noqa: ARG001
+        raise RuntimeError('章节表不可用')
+
+    monkeypatch.setattr(store, 'list_chapters', _boom)
+    result = _toolbox(store).call('read_chapter', {'chapter_index': 13})
+    assert '第13章' in result.observation
+    assert result.chunks
+
+
+# ------------------------------------- C：未收敛时不得淘汰最早发现的证据
+
+def _run_shape():
+    """2026-09-24 那次的真实形状：step1 命中正解，之后 5 步全在漂移，originals 为空。"""
+    early = [
+        {'chunk_id': 'c1', 'text': '瞽者', 'chapter_index': 40},
+        {'chunk_id': 'c2', 'text': '女王远送、路旁闪出一个女子', 'chapter_index': 60},
+    ]
+    noise = [
+        {'chunk_id': f'c{i}', 'text': '白骨精', 'chapter_index': 32}
+        for i in range(3, 38)
+    ]
+    return early, noise
+
+
+def test_merge_keeps_earliest_anchor_when_agent_did_not_converge() -> None:
+    """规则三：未收敛时「越晚越接近结论」不成立，最早定位到的片段不能被整批挤掉。
+
+    真实复刻（cap=16、originals 为空、chunks=35）：改动前保留区间是 c13..c25，
+    **step1 的 c1/c2 全部落选**（c2 就是正解场景所在的 idx 60），
+    判官随后只能说「现有《西游记》片段只有白骨精…」。
+    """
+    early, noise = _run_shape()
+    merged = merge_agent_chunks(early + noise, [], cap=16, converged=False)
+    ids = [c['chunk_id'] for c in merged]
+    assert 'c2' in ids, '最早定位到的那条（正解场景）被最新那批挤掉了'
+    assert len(merged) == 16
+
+
+def test_merge_recency_priority_is_unchanged_when_converged() -> None:
+    """收敛时行为与改动前**完全一致** —— 既有契约不许动。
+
+    `tests/test_agent.py` 里另有一条测试（小雷音寺那次）明确要求
+    「agent 名额应全部给最新一批」；那条钉的是**收敛**场景，本参数默认 True 时必须原样成立。
+    """
+    early, noise = _run_shape()
+    merged = merge_agent_chunks(early + noise, [], cap=16)
+    ids = [c['chunk_id'] for c in merged]
+    assert 'c1' not in ids and 'c2' not in ids
+    assert 'c37' in ids, '收敛时仍然是「最新优先」'
+

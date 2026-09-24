@@ -41,6 +41,14 @@ PRONOUNS: frozenset[str] = frozenset({
     '此', '该', '其', '这东西', '这人', '这事', '此物', '这只', '那只',
 })
 
+# 「指示词 + 量词」组合的形态档：那个/这位/这段/这本/这部/那种…
+# 只列**量词性**的第二个字。刻意不含 么/样/边/里/儿 ——
+# 「那么/这么/那样/这样/那边」也是 r，但它们是副词/方位性的，不是指代。
+_DEMONSTRATIVE_HEADS: frozenset[str] = frozenset({'这', '那'})
+_DEMONSTRATIVE_CLASSIFIERS: frozenset[str] = frozenset(
+    set('个位些只种本部段篇章回条件次名群张把条')
+)
+
 # 组块用的「像名字」的词性。刻意**不含** 'a'（形容词）：
 # 「老虎(nr) 精(a) 寅(mg) 将军(n)」——正是让 'a' 断开，
 # 「寅将军」才作为一个完整块被合并出来（实测）。
@@ -84,11 +92,30 @@ def detect_pronoun(question: str) -> list[str]:
     """返回问题里的代词性指代词；没有则空列表。
 
     代词必须**单独成词且词性为 r**：拿 `in` 做子串匹配会把「应该」判成「该」。
+
+    除词表外还按**形态**补一档：「指示词 + 量词」（那个/这位/那段/这本/这部/那种…）。
+    依据（2026-09-24 实测）：jieba 把 `那段`/`这本`/`这部`/`那种` 都标成 `r`，
+    但它们**不在** `PRONOUNS` 里 → ``detect_pronoun('你刚才说的那段再解释一下')`` 返回 ``[]``，
+    后果与「代词漏检」完全一样（gold `mt-11-adversarial-impersonal-followup` 正是这个形态）。
+    用**显式量词集合**而不是「只要 r 且以 这/那 开头」：`那么`/`这么`/`那样` 也是 `r`，
+    但它们是副词性的，绝不能判成指代（'么'/'样' 不在量词集合里，天然挡掉）。
     """
     if not question:
         return []
     pseg = _posseg()
-    return [w for w, flag in pseg.cut(question) if flag == 'r' and w in PRONOUNS]
+    return [
+        word
+        for word, flag in pseg.cut(question)
+        if flag == 'r'
+        and (
+            word in PRONOUNS
+            or (
+                len(word) >= 2
+                and word[0] in _DEMONSTRATIVE_HEADS
+                and word[1] in _DEMONSTRATIVE_CLASSIFIERS
+            )
+        )
+    ]
 
 
 def has_own_anchor(question: str) -> bool:
@@ -182,11 +209,85 @@ def collect_candidates(
     return picked
 
 
+# 定指描述的回声窗口：只看最近几条上文。
+_ANAPHORA_WINDOW = 4
+
+# 能当「指称中心」的普通名词词性。刻意**不含** nr/nrt（专名）：
+# 问句自带专名说明句内可解，由 has_own_anchor 排除，不该走回指路径。
+_REFERENT_FLAGS: frozenset[str] = frozenset({'n', 'ns', 'nt', 'nz', 'ng'})
+
+
+def detect_descriptive_reference(
+    question: str, history: list[dict] | None, window: int = _ANAPHORA_WINDOW
+) -> list[str]:
+    """问句是否在**回指上文提到过的普通名词**（定指描述）；返回回声词列表。
+
+    背景（2026-09-24 实测的端到端失败）：用户先问了女儿国那段，接着追问
+    「路旁闪出的女子是谁？」。这句的指代是**定指名词短语**「路旁闪出的女子」，
+    不是代词 —— jieba 切作 `路旁/s 闪出/v 的/uj 女子/n 是/v 谁/r`，
+    ``detect_pronoun`` 返回 ``[]``（「谁」词性是 r 但不在词表），
+    于是上文一个字都没进 query：
+
+        retrieve('路旁闪出的女子是谁？')                       ->  0 hits  ← 首检 0 命中
+        retrieve('女儿国 路旁闪出的女子是谁')                    -> 16 hits，正解排第 2
+        retrieve('路旁闪出的女子是谁？（上文相关实体：助手、hello、唐僧、王后）')
+                                                              -> 11 hits，正解 rank1/rank2
+
+    ⚠️ **不能用最长公共子串或字符级重叠做判据**（先试过，实测不成立）：
+    上文那句是「路旁**又**闪出**一个**女子」，问句是「路旁闪**出**的女**子**是谁」，
+    最长公共子串只有 2 字（「路旁」「闪出」「女子」），被「又」「一个」「的」「是谁」打断。
+    所以判据必须是**内容词回声**：问句里的普通名词，字面出现在最近的上文里。
+
+    刻意保持窄：只认**非通用**普通名词（``_GENERIC`` 里的「妖怪」「特点」等不算）；
+    ``has_own_anchor`` 的句子一律排除；没有上文就永不触发。
+    依据是 `ag-ordinal-04` 的前车之鉴 —— 那次问句自带专名，改写把上文实体追加进去后
+    由 PASS 翻成 FAIL，所以「自带专名」这条闸门必须同时管住新路径。
+    """
+    if not question or not history:
+        return []
+    if has_own_anchor(question):
+        return []
+    pseg = _posseg()
+    nouns = [
+        word
+        for word, flag in pseg.cut(question)
+        if flag in _REFERENT_FLAGS and len(word) >= 2 and word not in _GENERIC
+    ]
+    if not nouns:
+        return []
+    recent = ' '.join(str(msg.get('content') or '') for msg in history[-window:])
+    if not recent:
+        return []
+    return [word for word in nouns if word in recent]
+
+
+def is_descriptive_anaphora(question: str, history: list[dict] | None) -> bool:
+    """本轮是否该走「定指描述回指」路径（供 qa.py 决定要不要先给 agent 一次机会）。
+
+    与 ``resolve_query`` 里的判据同源，抽出来单独用是为了不搅动它的返回值契约
+    （2 元组被 20 多条测试与 API 观测依赖）。
+
+    **为什么路由需要知道这件事**（2026-09-24 实测）：
+    修好闸门后 `retrieve` 从 0 命中变成 11 命中，但命中的是「路旁闪出／女王远送」**那一段场景**，
+    而写着名字的那一块（第五十五回「毒敌山琵琶洞…蝎子精」）**没有被检索到** ——
+    问句与名字之间没有字面桥梁，这是词汇鸿沟，不是排序问题。
+    更糟的是「有片段」会让 `judge` 认为证据充足，**反而把 agent 挡在门外**，
+    而 agent 的 `read_chapter` 正是唯一能读到那一块的手段（实测 A/B：让 agent 跑时 2/3 答对）。
+    所以这类追问要显式允许 agent 介入。
+    """
+    if not question:
+        return False
+    if detect_pronoun(question):
+        return False  # 代词路径另算：指称实体本身已进 query，检索层就能解决
+    return bool(detect_descriptive_reference(question, history))
+
+
 def resolve_query(
     question: str,
     history: list[dict] | None,
     enabled: bool = True,
     max_entities: int = 4,
+    anaphora_enabled: bool = True,
 ) -> tuple[str, list[str]]:
     """把含代词的追问改写成自带实体的查询。
 
@@ -197,8 +298,15 @@ def resolve_query(
     """
     if not enabled or not question:
         return question, []
+    echo: list[str] = []
     if not detect_pronoun(question):
-        return question, []  # 简单问题零改动、零开销
+        # 代词路径未命中，再看**定指描述回指**（2026-09-24 新增）。
+        # 两条路径互斥，汇合后共用同一套抽取与追加逻辑。
+        if not anaphora_enabled:
+            return question, []
+        echo = detect_descriptive_reference(question, history)
+        if not echo:
+            return question, []  # 简单问题零改动、零开销
     if has_own_anchor(question):
         # 句内已有实体，代词在句内就能解 —— 借上文只会掺噪声、稀释真正的信号
         logger.info('问答[改写] 问句自带专名，句内可解 → 不改写')
@@ -216,5 +324,8 @@ def resolve_query(
     #   ag-pronoun-01 的 agent 重新被触发（步数 0/0 → 0/4/3），把 CQR 省下的 agent 成本又还了回去。
     # 结论：靠 prompt 催「多试几个候选」不解决问题，反而削弱 CQR 在检索层已经拿到的收益。
     resolved = f'{question}（上文相关实体：{"、".join(entities)}）'
-    logger.info('问答[改写] %s → 实体=%s', question, entities)
+    if echo:
+        logger.info('问答[改写] 命中定指描述回指 回声=%s → 实体=%s', echo, entities)
+    else:
+        logger.info('问答[改写] %s → 实体=%s', question, entities)
     return resolved, entities

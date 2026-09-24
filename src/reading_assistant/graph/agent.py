@@ -358,8 +358,11 @@ class ToolBox:
 
         merged_hits: dict[str, Any] = {}
         per_term_earliest: list[tuple[str, int, str]] = []
+        per_term_counts: dict[str, int] = {}
         for one in terms:
+            # 注意上限 400：命中数被封顶，但「过宽」判定只看有没有超过阈值，封顶无影响。
             one_hits = self.vector_store.search_text(one, self.document_ids, limit=400)
+            per_term_counts[one] = len(one_hits)
             for hit in one_hits:
                 merged_hits.setdefault(hit.id, hit)
             narrative = sorted(
@@ -386,7 +389,19 @@ class ToolBox:
                 continue
             by_doc.setdefault(doc_id, {}).setdefault(int(chapter_index), []).append(hit)
 
-        lines = [f'字面查找「{term}」：全书共 {len(hits)} 处命中。']
+        # 过宽词的告警（2026-09-24 新增）。**只提示、不拒绝、不改片段** ——
+        # 拒绝执行会把 agent 的步数预算白白吃掉一步，而它本来就已经很紧（max_steps=6）。
+        broad = [
+            (name, count)
+            for name, count in per_term_counts.items()
+            if count > _BROAD_GREP_MAX_HITS
+        ]
+        warnings = [
+            f'⚠️ 「{name}」在全书命中 {count} 条，**过宽、几乎无法定位** ——'
+            '请换成更具体的说法再查（把类别词换成场景/动作，例如「路旁闪出」「旋风」）。'
+            for name, count in broad
+        ]
+        lines = [*warnings, f'字面查找「{term}」：全书共 {len(hits)} 处命中。']
         for doc_id, chapters in by_doc.items():
             title = self.doc_titles.get(doc_id) or f'文档{doc_id}'
             ordered = sorted(chapters)
@@ -442,6 +457,16 @@ class ToolBox:
         lines.append(
             '\n提示：判断「第 N 个」请用【正文回目】的顺序（它等于书的顺序），'
             '取第一项即最早；确定后用 read_chapter 取该章细节。'
+        )
+        # 邻接原则（2026-09-24 新增）：实体名常**紧邻在下一回开头**给出。
+        # 依据：agent 手里有 idx 60（只写「路旁又闪出一个女子」，没给名字），
+        # 而正解在 idx 61 开头 —— 沙僧道「是一个女子，弄阵旋风，把师父摄了去也」之后即点明蝎子精。
+        # 它却回头自由检索，把 6 步预算耗尽。这里只给原则，具体的「下一回是哪个 index」
+        # 由 read_chapter 的返回给出（那里才有确定的 chapter_index，grep 一次可能命中很多回）。
+        lines.append(
+            '\n提示：若你要找的那个「是谁 / 是什么」的实体，在片段里始终没给出名字，'
+            '**它的名字常在紧邻的下一回开头直接点明** —— 用 read_chapter 取下一回看看，'
+            '不要为此重新自由检索。'
         )
         chunks = [_to_chunk(hit, 'grep') for hit in hits[:8]]
         return ToolResult('\n'.join(lines), chunks)
@@ -562,11 +587,33 @@ class ToolBox:
             f'  [{i + 1}/{len(found)}] {_clip(c.text or "", 200)}'
             for i, c in enumerate(found)
         )
+        # 邻接提示（2026-09-24 新增）：给一个**确定**的「下一回」入口。
+        # 依据：agent 手里有 idx 60，正解就在 idx 61，中间只隔一步「读下一章」，
+        # 但它没有任何东西提示它去看下一回，于是回头自由检索、预算耗尽。
+        # 成本：一行文本、零 LLM。取不到章节表时静默降级（不能因为提示拿不到而让正文不可用）。
+        next_line = ''
+        try:
+            later = [
+                (ci, name)
+                for ci, name in self.vector_store.list_chapters(
+                    found[0].metadata.get('document_id')
+                )
+                if ci > chapter_index
+            ]
+        except Exception:  # noqa: BLE001 - 邻接提示是增强项，失败不影响正文
+            later = []
+        if later:
+            next_index, next_name = later[0]
+            next_line = (
+                f'\n\n相邻：下一回是 chapter_index={next_index}《{_clip(str(next_name), 34)}》。'
+                '**若你要找的那个实体在本章里还没给出名字，先读它** ——'
+                '书中常在下一回开头就把「是谁」直接点明。'
+            )
         return ToolResult(
             f'第{chapter_index}章《{_clip(chapter_name, 34)}》全文已取回'
             f'（共 {len(found)} 段、{len(text)} 字）——**完整正文已进入你的可用原文片段**，'
             f'下面只是每段开头，便于你判断还需不需要读别的章：\n'
-            f'{_clip(preview, MAX_CHAPTER_CHARS * 2)}',
+            f'{_clip(preview, MAX_CHAPTER_CHARS * 2)}{next_line}',
             chunks,
         )
 
@@ -602,6 +649,19 @@ SYSTEM_PROMPT = """你是阅读助手的检索策略模块。你的唯一任务�
   顺着它答「黄风怪」就错了 —— 真正的第一个是第十三回的寅将军。
   **判断「第几个」只能依据 grep 给出的回目顺序。**
 
+## 证据必须来自本书语料，而不是你对这本书的记忆
+
+- **不要把你在某个片段里读到的细节，拼成一句语料里并不存在的原句，再拿去搜。**
+  实测（2026-09-24）：agent 从 idx 32（白骨精那一回）读到「青砂罐」「绿磁瓶」，
+  就用它们拼出「山坡下闪出一个女子 左手提着一个青砂罐 右手提着一个绿磁瓶」去 search。
+  这句话在库里**一个字都字面命不中**，但语义检索对**任何**查询都会返回结果，
+  于是这条没有依据的线索被"确认"了 —— 接下来 4 步全烧在它上面。
+  → 一条线索值不值得追，看它能不能被 **grep 字面命中**。命不中就别追。
+- **实体在片段里没给出名字时，先看紧邻的下一回。**
+  实测：idx 60 只写了「路旁又闪出一个女子，一阵旋风把唐僧摄走」，没给名字；
+  而 idx 61（下一回开头）沙僧直接说出了她是谁。
+  read_chapter 的返回里会告诉你下一回是哪个 chapter_index，用它，别重新自由检索。
+
 ## 其它规则
 
 - 「有没有提到过」「出现几次」同样以 grep 为准 —— 语义检索对这类问题会全部落空，
@@ -613,12 +673,26 @@ SYSTEM_PROMPT = """你是阅读助手的检索策略模块。你的唯一任务�
 请逐步思考：先想清楚缺什么信息，再选最合适的工具。"""
 
 
+# 过宽 grep 的告警阈值，按**单个 term** 的命中块数算。
+# 实测（2026-09-24，全书 1520 块）：
+#   '人' 1315 / '妖怪' 170 / '女子' 59        ← 必须拦住：在一本小说里等于没有约束
+#   '山坡下' 21 / '路旁闪出' 2 / '白骨夫人' 2   ← 必须放行：正常定位用的具体说法
+# 取 40：把这两组干净分开，且离 21 还有余量。
+#
+# 依据的失败现场：agent 用 `grep '女子'`（59 条）当定位词，白骨精那一回（idx 32）
+# 由此混进来，随后 6 步预算全烧在它上面，而正解（idx 61）从头到尾没被读到。
+_BROAD_GREP_MAX_HITS = 40
+
+
 def merge_agent_chunks(
-    agent_chunks: list[dict], originals: list[dict], cap: int
+    agent_chunks: list[dict],
+    originals: list[dict],
+    cap: int,
+    converged: bool = True,
 ) -> list[dict]:
     """合并 agent 片段与原有片段，**保证原有片段不被清空、且按来源分层取用**。
 
-    ## 两条各自独立的规则（都来自实测失败）
+    ## 三条各自独立的规则（都来自实测失败）
 
     **规则一：原有片段留名额。**
     原来「agent 在前、截断到 cap」在 agent 走错方向时会把 28 条塞满 16 个名额、
@@ -672,7 +746,35 @@ def merge_agent_chunks(
     # 于是截到 13 条时 agent 的 11 条原封不动、只给原有片段留下 2 个空位 →
     # reserve=8 的意图落空，实际只保 5 条。
     # 真实日志证据：`合并后 16 条（其中原有 5 条）`（agent 11 条、原有 12 条、cap 16）。
-    _take(ordered_agent[:agent_budget])
+    # 规则三（2026-09-24）：**没收敛时**，给最早发现的「锚」片段留名额。
+    #
+    # 前两条规则都建立在「agent 轨迹是收敛的、越晚越接近结论」之上。
+    # 这个前提有反例：2026-09-24 那次 agent 走偏后 `stopped=budget finished=False`
+    # —— 它**没收敛**，于是「最新一批」恰恰全是漂移的产物。
+    # 现场：step 1 `grep '路旁闪出'` 已经拿到正解场景（idx 60），
+    # 之后 5 步全在白骨精上打转（34 条），最终 `chunks=35 → 合并后 16 条`，
+    # 用真实函数复刻的结果是「保留区间 c13..c25、step1 的 c1/c2 全部落选」，
+    # 判官随后只能说「现有片段只有白骨精…」。这题的正解就在 idx 61，离它一步之遥。
+    #
+    # 所以：只有当 agent **自己给出了结论**（converged=True）时，「最新优先」才成立；
+    # 没收敛时，「最早定位到的那批」和「最后一批」的可信度是同级的，不能整批丢掉。
+    # `converged=True` 时行为与改动前**完全一致** —— 既有两条 merge 测试（小雷音寺那次
+    # 「后出的被丢掉」是要防的回归）钉的就是那种收敛场景，必须原样保持。
+    anchor_reserve = 0
+    anchors: list[dict] = []
+    if not converged:
+        seen_chapters: set[Any] = set()
+        for chunk in agent_chunks:  # 传入顺序 = agent 的发现顺序
+            key = chunk.get('chapter_index')
+            if key is None or key in seen_chapters:
+                continue
+            seen_chapters.add(key)
+            anchors.append(chunk)  # 每章只留**首次**发现的那条
+        anchor_reserve = min(len(anchors), max(1, agent_budget // 4))
+        anchors = anchors[:anchor_reserve]
+
+    _take(ordered_agent[: max(0, agent_budget - anchor_reserve)])
+    _take(anchors)
     _take(originals)
     _take(ordered_agent)
     return picked[:cap]

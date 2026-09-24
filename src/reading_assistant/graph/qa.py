@@ -29,7 +29,12 @@ from reading_assistant.graph.agent import (
     run_agent_loop,
 )
 from reading_assistant.graph.intent import build_prototype_router, route_fast
-from reading_assistant.graph.rewrite import resolve_query as resolve_coreference
+from reading_assistant.graph.rewrite import (
+    is_descriptive_anaphora,
+)
+from reading_assistant.graph.rewrite import (
+    resolve_query as resolve_coreference,
+)
 from reading_assistant.graph.state import (
     load_conversation_state,
     merge_state,
@@ -82,6 +87,7 @@ class QAState(TypedDict, total=False):
     conv_state: dict | None  # 会话结构化状态(替代滚动摘要, 见 graph/state.py)
     resolved_question: str | None  # 指代消解后的**检索/缓存**查询（无改写时等于 question）
     cqr_entities: list[str] | None  # 本轮改写并入的上文实体（供观测/评测）
+    cqr_anaphora: bool  # 本轮走的是「定指描述回指」路径（决定是否给 agent 一次机会）
     intent: str | None  # gate 分类结果: book | history | chat
     cache_channel: str | None  # exact | semantic | identifier | miss | disabled
     cache_similarity: float | None  # 语义/标识符命中时的相似度
@@ -1103,7 +1109,12 @@ def build_qa_graph(
 
         # 合并策略：agent 片段优先，但保证原有片段不被清空（见 merge_agent_chunks 的说明）
         merged = merge_agent_chunks(
-            run.chunks, list(state.get('chunks') or []), budget.max_chunks
+            run.chunks,
+            list(state.get('chunks') or []),
+            budget.max_chunks,
+            # 「没收敛」= agent 自己没给出结论（预算耗尽/异常），此时「越晚越接近结论」不成立，
+            # 最早定位到的片段不能被最新那批整批挤掉（见 merge_agent_chunks 规则三）。
+            converged=run.finished,
         )
         kept_original = sum(
             1 for c in merged
@@ -1143,6 +1154,14 @@ def build_qa_graph(
         return not state.get('agent_used')
 
     def route_after_judge(state: QAState) -> str:
+        if state.get('cqr_anaphora') and _agent_available(state):
+            # 定指回指追问：**有片段不等于够用**。
+            # 实测（2026-09-24）：问「路旁闪出的女子是谁？」，检索给到 11 条、含正确的第 61 章，
+            # 但那一块正文里根本没出现「蝎子精」——「有片段」于是让 judge 认为证据充足、
+            # 把 agent 挡在门外，最终输出「原文片段没有交代那女子的身份」（3/3 全错）。
+            # 而 agent 的 read_chapter(61) 能一次读到名字（让 agent 跑时 2/3 答对）。
+            # 所以这一路必须放行，让「读整章」发生。
+            return 'agent'
         if not state.get('needs_clarification'):
             return 'answer'
         # 一次检索什么都没拿到 —— 先让 agent 换个策略自己再试
@@ -1216,11 +1235,25 @@ def build_qa_graph(
             state.get('history'),
             enabled=get_settings().cqr_enabled,
             max_entities=get_settings().cqr_max_entities,
+            anaphora_enabled=get_settings().cqr_anaphora_enabled,
+        )
+        # 「定指描述回指」与「代词回指」的检索性质不同：代词那句里指称实体本身已经进了 query，
+        # 检索层能解决；定指描述那句则常常只能捞到**场景**、捞不到写着名字的那一块
+        # （词汇鸿沟，见 rewrite.is_descriptive_anaphora 的实测记录）。
+        # 所以这里把路径记进 state，交给路由决定要不要先让 agent 读整章。
+        anaphora = bool(
+            resolved != question
+            and entities
+            and is_descriptive_anaphora(question, state.get('history'))
         )
         if resolved == question:
             # 无改写 → 留 None 让 _effective_question 回落原话（不复制一份冗余字符串）
-            return {'resolved_question': None, 'cqr_entities': None}
-        return {'resolved_question': resolved, 'cqr_entities': entities}
+            return {'resolved_question': None, 'cqr_entities': None, 'cqr_anaphora': False}
+        return {
+            'resolved_question': resolved,
+            'cqr_entities': entities,
+            'cqr_anaphora': anaphora,
+        }
 
 
     def gate(state: QAState) -> dict:

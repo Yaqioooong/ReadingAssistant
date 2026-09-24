@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from reading_assistant.graph.rewrite import (
     collect_candidates,
+    detect_descriptive_reference,
     detect_pronoun,
     extract_entities,
     resolve_query,
@@ -33,6 +34,39 @@ H_PRONOUN_02 = [
     {'role': 'user', 'content': '白骨精的故事讲了什么？'},
     {'role': 'assistant', 'content': '白骨精三次变化想吃唐僧，被孙悟空识破并打死。'},
 ]
+
+# 2026-09-24 端到端失败那一轮的上下文，逐字照抄（含中间那轮闲聊，
+# 因为它会往候选里掺「助手」「hello」—— 噪声是在场的，判据必须扛得住）
+H_DEFINITE_NP = [
+    {'role': 'user', 'content': (
+        '西游记中师徒四人到达女儿国时发生了什么事？国王对唐僧做了什么？唐僧如何处理的？'
+    )},
+    {'role': 'assistant', 'content': (
+        '师徒四人到女儿国时，女王先是远送他们，随后在分别时公然挽留唐僧：她称愿以一国之富招'
+        '唐僧为夫，让他登位称君，自己做王后。唐僧对此的处理是：他慢下龙车，向女王拱手告辞。'
+        '八戒也上前撒泼，把女王吓得跌入辇驾之中；随后沙僧趁机把唐僧抢出人群，扶他上马。'
+        '不料路旁又闪出一个女子，一阵旋风把唐僧摄走，不知去向。'
+    )},
+    {'role': 'user', 'content': 'hello'},
+    {'role': 'assistant', 'content': (
+        '你好！我是你的阅读助手，随时可以帮你解答关于书中内容的问题。'
+    )},
+]
+Q_DEFINITE_NP = '路旁闪出的女子是谁？'
+
+
+def _lcs_len(a: str, b: str) -> int:
+    """最长公共子串长度。只用来证明判据**不是**它（见下）。"""
+    best = 0
+    prev = [0] * (len(b) + 1)
+    for i in range(1, len(a) + 1):
+        cur = [0] * (len(b) + 1)
+        for j in range(1, len(b) + 1):
+            if a[i - 1] == b[j - 1]:
+                cur[j] = prev[j - 1] + 1
+                best = max(best, cur[j])
+        prev = cur
+    return best
 
 
 class TestPronounDetection:
@@ -322,3 +356,202 @@ class TestCandidateRecall:
         got = extract_entities('唐僧师徒遇到的第一个妖怪是什么？')
         assert '唐僧' in got
         assert '妖怪' not in got and '西游记' not in got
+
+
+class TestDefiniteNpAnaphora:
+    """定指名词短语回指 —— 2026-09-24 实测的端到端失败。
+
+    用户先问了女儿国那段（回答正确、引用了第五十四回），紧接着追问
+    「路旁闪出的女子是谁？」。这句的指代是**定指名词短语**「路旁闪出的女子」，
+    不是代词，旧闸门 `if not detect_pronoun(question): return question, []` 直接返回，
+    **上文一个字都没进 query**：
+
+        retrieve('路旁闪出的女子是谁？')                     ->  0 hits  ← 首检 0 命中
+        retrieve('女儿国 路旁闪出的女子是谁')                  -> 16 hits，正解排第 2
+        retrieve('路旁闪出的女子是谁？（上文相关实体：助手、hello、唐僧、王后）')
+                                                            -> 11 hits，正解 rank1
+
+    首检 0 命中把一道一次检索就能答的题推进了检索 agent；agent 6 步预算耗尽
+    （`stopped=budget finished=False`）后仍判「信息不足」——
+    而正确答案（蝎子精，毒敌山琵琶洞，第五十五回）就在语料里。
+    """
+
+    def test_gate_fires_on_definite_np_followup(self) -> None:
+        resolved, entities = resolve_query(Q_DEFINITE_NP, H_DEFINITE_NP)
+        assert resolved != Q_DEFINITE_NP, '定指回指必须触发改写（这就是那个 0 命中的根因）'
+        assert resolved.startswith(Q_DEFINITE_NP)
+        assert '（上文相关实体：' in resolved
+        assert entities, '触发改写就必须真的并入实体'
+
+    def test_echo_fires_where_longest_common_substring_cannot(self) -> None:
+        """判据必须是**内容词回声**，不能是字符级重叠/最长公共子串。
+
+        我原先就是这么想的，实测被证伪：上文那句是「路旁**又**闪出**一个**女子」，
+        问句是「路旁闪**出**的女**子**是谁」，最长公共子串只有 2 字
+        —— 被「又」「一个」「的」「是谁」打断。
+        谁把判据"简化"成公共子串，第一条断言就会红。
+        """
+        source = H_DEFINITE_NP[1]['content']
+        assert _lcs_len(Q_DEFINITE_NP, source) <= 2, '前提变了：现在真的有长公共子串了'
+        assert detect_descriptive_reference(Q_DEFINITE_NP, H_DEFINITE_NP) == ['女子']
+
+    def test_no_echo_is_untouched(self) -> None:
+        """上文里没有回声名词 → 不改写（简单问题零改动零开销）。"""
+        q = '猪八戒的钉钯有什么来历？'
+        assert resolve_query(q, H_DEFINITE_NP) == (q, [])
+
+    def test_without_history_is_untouched(self) -> None:
+        assert resolve_query(Q_DEFINITE_NP, []) == (Q_DEFINITE_NP, [])
+        assert resolve_query(Q_DEFINITE_NP, None) == (Q_DEFINITE_NP, [])
+
+    def test_own_anchor_blocks_the_new_path_too(self) -> None:
+        """「自带专名」这道闸门必须同时管住新路径。
+
+        依据 `ag-ordinal-04`：那次问句自带专名，改写把上文实体追加进去后由 PASS 翻成 FAIL。
+        """
+        q = '女儿国国王对唐僧说了什么？'
+        assert detect_descriptive_reference(q, H_DEFINITE_NP) == []
+        assert resolve_query(q, H_DEFINITE_NP) == (q, [])
+
+    def test_anaphora_switch_is_independent_of_pronoun_path(self) -> None:
+        """单变量 A/B 的开关：关掉新路径，代词路径必须原样工作。"""
+        pronoun_q = '它的特点是什么？'
+        assert resolve_query(
+            pronoun_q, H_PRONOUN_01, anaphora_enabled=False
+        )[0] != pronoun_q
+        assert resolve_query(
+            Q_DEFINITE_NP, H_DEFINITE_NP, anaphora_enabled=False
+        ) == (Q_DEFINITE_NP, [])
+
+
+class TestDemonstrativeClassifierPronouns:
+    """「指示词 + 量词」也是代词，但**不在 PRONOUNS 词表里** → 旧实现整类漏检。
+
+    jieba 把 `那段`/`这本`/`这部`/`那种` 都标成 `r`，而 `detect_pronoun` 只认词表，
+    于是 `detect_pronoun('你刚才说的那段再解释一下')` 返回 `[]`
+    —— 与「代词漏检」后果完全一样（gold `mt-11-adversarial-impersonal-followup` 正是这个形态）。
+    """
+
+    def test_detects_demonstrative_classifier_forms(self) -> None:
+        for q, want in [
+            ('你刚才说的那段再解释一下', ['那段']),
+            ('这本讲了什么？', ['这本']),
+            ('这部小说讲了什么？', ['这部']),
+            ('那种妖怪有什么特点？', ['那种']),
+        ]:
+            assert detect_pronoun(q) == want, q
+
+    def test_known_ceiling_is_jieba_segmentation(self) -> None:
+        """已知上限，**如实钉住**，免得后来人以为这一档已经覆盖全了。
+
+        形态档只能认出 jieba **切成了一个 r 词**的形态，切法不听话的就漏：
+            '那部书怎么样？' -> 那/r + 部书/n     （没切成 '那部'）
+            '那本书呢？'     -> 那本书/nr        （连词性都不是 r）
+        要再往上收就得引入裸 `这`/`那` 当指示词的规则，但那会放宽一批
+        目前没有实测依据的形态 —— 留作后续，不在本次范围。
+        """
+        assert detect_pronoun('那部书怎么样？') == []
+        assert detect_pronoun('那本书呢？') == []
+
+    def test_adverbial_na_me_is_not_a_pronoun(self) -> None:
+        """`那么`/`这么`/`那样` 词性也是 r，但它们是副词性的 —— 绝不能判成指代。
+
+        所以形态档用**显式量词集合**卡第二个字（'么'/'样' 不在集合里，天然挡掉）。
+        """
+        for q in ['那么，答案是什么？', '这么写对不对？', '那样做可以吗？']:
+            assert detect_pronoun(q) == [], q
+
+
+class TestAnaphoraRouting:
+    """定指回指 → 必须显式放行 agent。
+
+    这一条是被 A/B 实测逼出来的（2026-09-24，各 3 次）：
+
+        闸门修好之前：retrieve 0 命中 → judge 判信息不足 → 进 agent → 2/3 答对蝎子精、1/3 要澄清
+        闸门修好之后（未接线）：retrieve 11 命中 → judge 认为证据充足 → **不进 agent**
+                              → 输出「原文片段没有交代那女子的身份」**3/3 全错**
+        闸门修好 + 放行：3/3 答对、0/3 澄清
+
+    根因是「有片段」≠「够用」：那 11 条命中里确实有**正确的第 61 章**，
+    但命中的那一块正文里没出现「蝎子精」—— 名字在 61 章的另一块，
+    问句与它之间没有字面桥梁（词汇鸿沟，不是排序问题）。
+    而 `read_chapter` 恰恰能一次读到那一块。所以这一路必须绕过 judge 的「有片段即充足」。
+    """
+
+    def test_pronoun_path_is_not_the_anaphora_path(self) -> None:
+        """代词问句的指称实体已经进了 query，检索层能解决 —— 不该走这条路由。
+
+        两者混为一谈会让所有代词追问都多烧一次 agent（CQR 省下的成本又还回去）。
+        """
+        from reading_assistant.graph.rewrite import is_descriptive_anaphora
+
+        assert is_descriptive_anaphora('它的特点是什么？', H_PRONOUN_01) is False
+        assert is_descriptive_anaphora(Q_DEFINITE_NP, H_DEFINITE_NP) is True
+
+    def test_flag_is_false_without_history_or_echo(self) -> None:
+        from reading_assistant.graph.rewrite import is_descriptive_anaphora
+
+        assert is_descriptive_anaphora(Q_DEFINITE_NP, []) is False
+        assert is_descriptive_anaphora(Q_DEFINITE_NP, None) is False
+        assert is_descriptive_anaphora('猪八戒的钉钯有什么来历？', H_DEFINITE_NP) is False
+
+
+class TestGraphCarriesAnaphoraFlag:
+    """端到端：`cqr_anaphora` 必须真的进图 state —— 它就是路由判据。"""
+
+    def _graph(self, tmp_path: Path):
+        from reading_assistant.storage import create_db_engine, create_session_factory, init_db
+        from reading_assistant.storage.models import Document
+        from reading_assistant.storage.vector_store import InMemoryVectorStore, StoredChunk
+
+        engine = create_db_engine('sqlite:///:memory:')
+        init_db(engine)
+        factory = create_session_factory(engine)
+        with factory() as session:
+            session.add(Document(filename='d1.epub', title='d1', file_hash='f1',
+                                 content_hash='c1', index_status='indexed'))
+            session.commit()
+        store = InMemoryVectorStore()
+        store.add([
+            StoredChunk(id='d1-0', text='西游记 女儿国 女子 旋风 唐僧',
+                        metadata={'document_id': 1, 'chapter': '第五十四回', 'chapter_index': 60},
+                        embedding=[1.0, 0.0]),
+        ])
+        return factory, store
+
+    def _invoke(self, factory, store, question: str, history: list[dict], thread: str) -> dict:
+        from reading_assistant.graph.qa import build_qa_graph
+        from reading_assistant.storage.models import ChatMessage, ChatSession
+
+        with factory() as session:
+            chat = ChatSession()
+            session.add(chat)
+            session.commit()
+            sid = chat.id
+            for msg in history:
+                session.add(ChatMessage(session_id=sid, role=msg['role'], content=msg['content']))
+            session.commit()
+        graph = build_qa_graph(factory, store)
+        return graph.invoke(
+            {'question': question, 'session_id': sid, 'document_ids': [1]},
+            config={'configurable': {'thread_id': thread}},
+        )
+
+    def test_definite_np_followup_sets_the_flag(self, tmp_path: Path) -> None:
+        factory, store = self._graph(tmp_path)
+        state = self._invoke(
+            factory, store, Q_DEFINITE_NP, H_DEFINITE_NP, 't-anaphora-on'
+        )
+        assert state.get('cqr_anaphora') is True, (
+            '定指回指没置位 → judge 会因为「有片段」放行到 answer，'
+            '而那条路实测 3/3 答错（见 TestAnaphoraRouting 的 A/B 数字）'
+        )
+        assert state.get('cqr_entities')
+
+    def test_plain_question_never_sets_the_flag(self, tmp_path: Path) -> None:
+        factory, store = self._graph(tmp_path)
+        state = self._invoke(
+            factory, store, '女儿国国王对唐僧说了什么？', H_DEFINITE_NP, 't-anaphora-off'
+        )
+        assert state.get('cqr_anaphora') is False
+
