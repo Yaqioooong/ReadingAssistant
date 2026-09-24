@@ -260,7 +260,10 @@ class Settings(BaseSettings):
     # 目标：让「它的特点是什么？」在检索前变成自带实体的查询。
     # 代词检测 + 实体抽取都是确定性规则，**零新增 LLM 调用**。
     cqr_enabled: bool = True  # 含代词的追问是否消解成自带实体的查询
-    cqr_max_entities: int = 4  # 最多并入几个上文实体（多候选容错，见 rewrite.py 模块说明）
+    # 最多并入几个上文实体。**实测（禁缓存，8 条代词用例离线量）**指称召回：
+    #   4 → 6/8 ；6 → 7/8 ；8 → 7/8（无进一步增益，白白扩大查询）
+    # 故取 6：召回已到上限，而注入的候选数比 4 只多两个。
+    cqr_max_entities: int = 6
 
     @property
     def chroma_persist_path(self) -> Path:

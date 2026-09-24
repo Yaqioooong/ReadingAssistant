@@ -147,6 +147,138 @@
         "list_chapters"
       ],
       "note": "带**锚点事件**的序数题（2026-09-21 17:11 用户实测）。正确答案是第十四回那只「忽然见一只猛虎…照头一棒打的脑浆迸万点桃红」的**虎精**（悟空剥皮做虎皮裙）。它比第十七回的白衣秀士（白花蛇）更早 —— 后者晚三回。本题暴露两个层次：① merge 把 agent 后出的发现丢掉（已修，不再转澄清）；② agent 的 grep 候选枚举依赖模型对书的先验知识，漏了第十四回的猛虎 → 仍会答成白衣秀士。改进方向：先定位锚点事件（收徒=第十四回）所在章，再从该章往后扫。"
+    },
+    {
+      "id": "ag-pronoun-03",
+      "class": "pronoun",
+      "question": "他是被谁收服的？",
+      "history": [
+        {
+          "role": "user",
+          "content": "黄风岭上那个妖怪是什么来历？"
+        },
+        {
+          "role": "assistant",
+          "content": "他是灵山脚下得道的黄毛貂鼠，因偷了琉璃盏内的清油，怕金刚拿他，便逃到下界为妖，唤作黄风怪，一口三昧神风十分厉害。"
+        }
+      ],
+      "expect_contains": "灵吉菩萨",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "search"
+      ],
+      "note": "代词类：实体在助手回复里；答案实体**不在历史中**，必须检索。话题即指称（易例）。"
+    },
+    {
+      "id": "ag-pronoun-04",
+      "class": "pronoun",
+      "question": "他最后被谁收服了？",
+      "history": [
+        {
+          "role": "user",
+          "content": "火云洞的红孩儿是谁？"
+        },
+        {
+          "role": "assistant",
+          "content": "他是牛魔王与罗刹女的儿子，号圣婴大王，在火云洞修行，会三昧真火，连孙悟空也近他不得。"
+        }
+      ],
+      "expect_contains": "观音",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "search"
+      ],
+      "note": "代词类：真实体在助手回复里；「收服」的施动者需检索。话题即指称（易例）。"
+    },
+    {
+      "id": "ag-pronoun-05",
+      "class": "pronoun",
+      "question": "她最后的下场如何？",
+      "history": [
+        {
+          "role": "user",
+          "content": "平顶山那两个大王是什么来历？"
+        },
+        {
+          "role": "assistant",
+          "content": "金角大王与银角大王本是太上老君看金炉银炉的两个童子，偷了老君的宝贝下界为妖；他们还有个干娘，是压龙山的九尾狐。"
+        }
+      ],
+      "expect_contains": "九尾狐",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "search"
+      ],
+      "note": "**非话题指称**：「她」指上文中后来补充提到的第三方（九尾狐），不是话题主体（金角银角）。这一类才是真正的指称选择难题。"
+    },
+    {
+      "id": "ag-pronoun-06",
+      "class": "pronoun",
+      "question": "他最后被谁收服了？",
+      "history": [
+        {
+          "role": "user",
+          "content": "狮驼岭那一回讲了什么？"
+        },
+        {
+          "role": "assistant",
+          "content": "狮驼岭有三个魔王，其中三魔王大鹏金翅雕最厉害，神通广大，连孙悟空也敌不过他。"
+        }
+      ],
+      "expect_contains": "如来",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "search"
+      ],
+      "note": "代词类：三个魔王中「他」指最后提到的三魔王；答案实体不在历史中。话题即指称（易例）。"
+    },
+    {
+      "id": "ag-pronoun-07",
+      "class": "pronoun",
+      "question": "他最后被谁收服了？",
+      "history": [
+        {
+          "role": "user",
+          "content": "黑风山的黑熊精是什么来历？"
+        },
+        {
+          "role": "assistant",
+          "content": "他本是黑风山黑风洞的妖怪，因偷了唐僧的锦襕袈裟，与孙悟空相斗，善使黑缨枪，十分骁勇。"
+        }
+      ],
+      "expect_contains": "观音",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "search"
+      ],
+      "note": "代词类：答案实体不在历史中，需检索。话题即指称（易例）。"
+    },
+    {
+      "id": "ag-pronoun-08",
+      "class": "pronoun",
+      "question": "他是谁座下的坐骑？",
+      "history": [
+        {
+          "role": "user",
+          "content": "乌鸡国那一回讲了什么？"
+        },
+        {
+          "role": "assistant",
+          "content": "乌鸡国国王被一个全真道士推入井中三年，那道士后来被孙悟空识破，原来是一头青毛狮子变的。"
+        }
+      ],
+      "expect_contains": "文殊",
+      "must_use_any_tool": [
+        "grep",
+        "read_chapter",
+        "search"
+      ],
+      "note": "**非话题指称**：「他」指最后提到的青毛狮子，不是开头的话题主体国王；答案实体（文殊）不在历史中。"
     }
   ]
 }

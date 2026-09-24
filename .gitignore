@@ -17,6 +17,9 @@ htmlcov/
 .DS_Store
 .idea/
 
+# 工具本地状态（sqlite 台账/锁，非项目内容）
+.devcouncil/
+
 # 上传的临时文件
 uploads/
 tmp/
