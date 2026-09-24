@@ -23,6 +23,7 @@ from reading_assistant.storage import (
     find_answer_for_clarification,
     session_scope,
 )
+from reading_assistant.utils.answer_text import sanitize_model_text
 from reading_assistant.utils.logger_handler import get_logger
 
 logger = get_logger('api')
@@ -96,13 +97,28 @@ def list_sessions(session: Session = Depends(get_db_session)):
 
 @router.get('/{session_id}/messages', response_model=list[schemas.MessageOut])
 def get_messages(session_id: int, session: Session = Depends(get_db_session)):
-    """查看会话的聊天记录。"""
+    """查看会话的聊天记录。
+
+    ⚠️ 这是**用户可见面**，必须过出口清洗：修复前存下来的助手消息里带着模型附加的
+    调用外壳标签（实测 3 条，用户就是在 app 里翻到其中一条才来报的）。
+    不清洗的话，回答正文修干净了、历史里那几条却永远还在。
+    """
     _ensure_session(session, session_id)
-    return list(
-        session.scalars(
-            select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)
-        )
+    rows = session.scalars(
+        select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)
     )
+    # 只构造响应对象，**不改 ORM 实体** —— 这是 GET，不该顺手往库里写东西；
+    # 存量的清洗走「读时中和」，不动用户数据。
+    return [
+        schemas.MessageOut(
+            id=row.id,
+            role=row.role,
+            content=sanitize_model_text(row.content) if row.role == 'assistant' else row.content,
+            meta=row.meta or {},
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
 
 
 @router.delete('/{session_id}', status_code=204)

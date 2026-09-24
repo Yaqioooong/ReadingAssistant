@@ -61,6 +61,7 @@ from reading_assistant.storage import (
     touch_qa_cache_hit,
 )
 from reading_assistant.storage.vector_store import VectorStore
+from reading_assistant.utils.answer_text import sanitize_model_text
 from reading_assistant.utils.logger_handler import get_logger
 
 logger = get_logger('qa')
@@ -687,7 +688,9 @@ def build_qa_graph(
                             }
                         touch_qa_cache_hit(session, best_entry)
                         # 必须在commit之前取值（DetachedInstanceError）
-                        answer = best_entry.answer
+                        # 出口清洗：**修好写路径不等于干净** —— 此前写进缓存的条目里已经有
+                        # 带标签的（实测 3 条），不清的话它们会在命中时把残渣带回来。
+                        answer = sanitize_model_text(best_entry.answer)
                         citations = list(best_entry.citations or [])
                         needs_clarification = best_entry.needs_clarification
                         logger.info(
@@ -733,7 +736,7 @@ def build_qa_graph(
                     'cache_invalidated': True,
                 }
             touch_qa_cache_hit(session, entry)
-            answer = entry.answer
+            answer = sanitize_model_text(entry.answer)  # 同上：中和存量缓存
             citations = list(entry.citations or [])
             needs_clarification = entry.needs_clarification
 
@@ -943,6 +946,11 @@ def build_qa_graph(
             # 兜底 1：模型未走工具，按纯文本处理
             content = response.content if hasattr(response, 'content') else str(response)
             logger.info('问答[answer] 纯文本回答 len=%d (%.0fms)', len(content), cost_ms)
+        # 出口清洗（唯一一道）：content 会同时进 API 响应、chat_messages 表、QA 缓存
+        # —— 在这里洗一次就覆盖三处，不必在每个去向各写一遍。
+        # 实测：模型会把调用外壳的闭合标签附加在工具参数末尾（``…[1]。</answer>\n</invoke>\n``），
+        # 见 utils/answer_text.py。
+        content = sanitize_model_text(content)
         titles = state.get('doc_titles') or {}
         all_citations = []
         for index, chunk in enumerate(state.get('chunks') or [], start=1):
@@ -1203,7 +1211,17 @@ def build_qa_graph(
             )
             rows.reverse()  # 时间正序（最早在前）
             history = _select_window(
-                [(m.role, m.content) for m in rows],
+                [
+                    # 入口清洗：这是**反向**的那一半 —— 出口只拦新的，
+                    # 而库里已有的带标签助手消息会一直躺在每轮 prompt 的历史里教模型模仿
+                    # （logs/qa_20260921.log 的 rendered history 能看到回放）。
+                    # **只洗助手消息**：用户消息是用户的输入，不替他们改写内容。
+                    (
+                        m.role,
+                        sanitize_model_text(m.content) if m.role == 'assistant' else m.content,
+                    )
+                    for m in rows
+                ],
                 settings.history_token_budget,
             )
             conv_state = load_conversation_state(session, sid)
@@ -1354,6 +1372,8 @@ def build_qa_graph(
                 content = str(content)
         if not content:
             content = '抱歉，我暂时没理解你的意思，换个说法试试？'
+        # 出口清洗：history 意图会把上面的历史原样回显给用户，同一条边界要覆盖到。
+        content = sanitize_model_text(content)
         logger.info(
             '问答[context_answer] intent=%s q=%.30s len=%d',
             state.get('intent'),
