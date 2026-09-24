@@ -199,6 +199,7 @@ def _build_answer_prompt(
 
 # ---- 多轮上下文：历史渲染 / 检索门 / 非检索作答 ----
 _HISTORY_ROLE_OVERHEAD = 4  # 「用户：」这类角色前缀的粗略 token 开销
+_CHUNK_LABEL_OVERHEAD = 8  # 「[n]\n《书名》\n」这类片段前缀的粗略 token 开销
 
 
 @lru_cache(maxsize=1)
@@ -237,8 +238,39 @@ def _clip_tokens(text: str, cap: int) -> str:
     return encoder.decode(tokens[:cap]) + '…'
 
 
+def _select_answer_chunks(chunks: list[dict], budget: int) -> list[dict]:
+    """按检索顺序整条累积，直到「再加一条就超预算」为止。
+
+    这是上下文管理的**另一半**：``_select_window`` 管历史原文，这里管注入答案的
+    检索片段。片段侧先前一个 token 都不数，只有 ``top_k`` / ``max_chunks`` 这种
+    按条数的限制 —— 语料一长，prompt 总量就没有上界
+    （实测 top_k=16 时最坏 18.3k token，加上历史 4000 就是 23k+）。
+
+    与 ``_select_window`` **刻意同形**，理由也相同：
+    - 从最相关的一端往回收（chunk[0] 是检索排序第一名），丢的是末尾最弱的几条；
+    - 不做半块截断：留下的都是完整片段，语义可预测、可断言；
+    - 第一条**无条件保留**（哪怕它自己就超预算）—— 否则预算偏小时会把片段清空，
+      而 ``judge`` 刚刚才按「有片段」把路由判进 ``answer``，立刻自相矛盾。
+      单块长度另有入库时的 ``chunk_size`` 兜底（实测 max 1174 token），不会失控。
+
+    不排序、不重排：返回顺序即入参顺序，citation 的 ``[n]`` 编号依赖这一点。
+    """
+    if budget <= 0:
+        # 与 _clip_tokens 的 cap<=0 同义：预算未配置视为不限
+        return list(chunks)
+    picked: list[dict] = []
+    used = 0
+    for chunk in chunks:
+        cost = _count_tokens(str(chunk.get('text') or '')) + _CHUNK_LABEL_OVERHEAD
+        if picked and used + cost > budget:
+            break
+        used += cost
+        picked.append(chunk)
+    return picked
+
+
 def _select_window(rows: list[tuple[str, str]], budget: int) -> list[dict]:
-    """从**最新**往回整条累积，直到「再加一条就超预算」为止。
+    """从最新往回整条累积，直到「再加一条就超预算」为止。
 
     刻意不做半条截断：保留的都是完整消息，语义可预测、可断言、易测。
     返回时间正序（最早在前），与 ``_render_history`` 的期望一致。
@@ -902,13 +934,33 @@ def build_qa_graph(
     def answer(state: QAState) -> dict:
         import time
 
+        settings = get_settings()
+        # 检索片段侧的 token 预算。⚠️ 裁剪**只能**在这里做，且必须让 prompt 与 citations
+        # 共用同一份列表：
+        # - 不能裁到 judge 之前 —— judge 是按「有没有 chunks」判路由的（有片段才进 answer），
+        #   裁早了正是 2026-09-24 那个坑的形状：命中正确的章却落到错误的块，
+        #   有片段反而把 agent 挡在门外（见 reports/definite-np-anaphora-20260924.md）；
+        # - citations 的 index 就是 prompt 里的 [n]，两个列表一旦不同源，编号必然错位。
+        chunks = _select_answer_chunks(
+            state.get('chunks') or [], settings.answer_chunk_token_budget
+        )
         prompt = _build_answer_prompt(
             question=state['question'],
-            chunks=state.get('chunks') or [],
+            chunks=chunks,
             clarification=state.get('clarification'),
             doc_titles=state.get('doc_titles'),
             history=state.get('history') or None,
             conv_state=state.get('conv_state'),
+        )
+        # 片段条数与 prompt 总量都是**先行指标**：前者说明预算是否开始生效，
+        # 后者是先前完全不可观测的量（实测 _count_tokens 在 9.5k token 上约 0.9ms，
+        # 相对一次作答的秒级耗时可忽略，故常开而不加开关）。
+        logger.info(
+            '问答[answer] 片段 %d/%d 条（预算 %d token）· prompt ≈%d token',
+            len(chunks),
+            len(state.get('chunks') or []),
+            settings.answer_chunk_token_budget,
+            _count_tokens(prompt),
         )
         start = time.perf_counter()
         tool_calls = []
@@ -953,7 +1005,8 @@ def build_qa_graph(
         content = sanitize_model_text(content)
         titles = state.get('doc_titles') or {}
         all_citations = []
-        for index, chunk in enumerate(state.get('chunks') or [], start=1):
+        # 用与 prompt 同一份裁剪后的列表：index 就是 prompt 里的 [n]
+        for index, chunk in enumerate(chunks, start=1):
             all_citations.append(
                 {
                     # index 为 prompt 中该片段的编号，用于与答案里的 [n] 标记对应展示
@@ -975,7 +1028,6 @@ def build_qa_graph(
         # 编号重排为连续的 1..n，回答里的 [n] 标记同步改写：
         # 避免"只引用 1 条却显示 [3]"这类让用户以为丢了引用的显示
         content, citations = _renumber_citations(content, citations)
-        settings = get_settings()
         if settings.cache_enabled and state.get('question_hash') and not state.get('cache_hit'):
             with session_scope(session_factory) as session:
                 doc_id = state.get('document_id')

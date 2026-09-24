@@ -255,6 +255,16 @@ class Settings(BaseSettings):
     history_token_budget: int = 4000  # 历史原文窗口总预算（token）
     history_msg_token_cap: int = 800  # 单条历史消息上限（token），防一条长回答吃掉整个窗口
     history_max_messages: int = 200  # 单次最多从库里取回的消息条数（规模护栏，不参与截断语义）
+    # 注入答案 prompt 的检索片段总预算（token）。这是上下文管理的**另一半** ——
+    # 上面三条只管历史原文，片段侧先前一个 token 都不数（只有 top_k / max_chunks
+    # 这种按条数的限制），语料一长 prompt 总量就没有上界。
+    # 取值依据（1520 块真实语料实测，见 scripts/probe_answer_budget.py）：
+    #   chunk token p50=882 / p90=1051 / max=1174；top_k=16 合计 均值 13.1k / 最坏 18.3k。
+    # 24000 覆盖实测最坏值并留约 30% 余量，故**当前语料下它是零行为变化**。
+    # 刻意取「今天不生效」：本项目的教训是静默降质最贵，主动裁掉检索证据是负收益
+    # （历史窗口那次反而把 6 条放大到 4000 token、3.7× 更多原文）。
+    # 它的职责是拦住语料/top_k 增长后的无界膨胀，不是压缩。
+    answer_chunk_token_budget: int = 24000
 
     # --- 对话式查询改写（CQR：指代消解，见 graph/rewrite.py）---
     # 目标：让「它的特点是什么？」在检索前变成自带实体的查询。
