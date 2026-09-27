@@ -1284,7 +1284,6 @@ def build_qa_graph(
         return {
             'history': history,
             # 落成纯 dict 进 state：LangGraph checkpoint 序列化对非基础类型很敏感
-            # （本项目已被 numpy 标量坑过一次）。
             'conv_state': asdict(conv_state) if conv_state else None,
         }
 
