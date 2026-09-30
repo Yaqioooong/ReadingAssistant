@@ -76,10 +76,16 @@ class AskResponse(BaseModel):
     agent_steps: int = 0
     cqr_entities: list[str] = []  # 本轮指代消解并入的上文实体（空=未改写）
     agent_actions: list[str] = Field(default_factory=list)
+    agent_plan: dict | None = None
+    agent_verification: dict | None = None
+    agent_cache_hits: int = 0
     # 缓存来源（供指标看板与前端反馈使用）
     cache_hit: bool = False
     cache_channel: str | None = None  # exact | semantic | identifier | miss | disabled
     cache_similarity: float | None = None
+    # 多问题问答：每个子问题的检索状态与证据，单问题为空列表
+    subquestions: list[dict] = Field(default_factory=list)
+    evidence_verification: dict | None = None
 
 
 class FeedbackCreate(BaseModel):
@@ -113,6 +119,11 @@ class HitlTaskOut(BaseModel):
     answer: str | None = None
     citations: list[CitationOut] = Field(default_factory=list)
     needs_clarification: bool = False
+    subquestions: list[dict] = Field(default_factory=list)
+    evidence_verification: dict | None = None
+    agent_plan: dict | None = None
+    agent_verification: dict | None = None
+    agent_actions: list[str] = Field(default_factory=list)
 
 
 class HitlClarificationRequest(BaseModel):

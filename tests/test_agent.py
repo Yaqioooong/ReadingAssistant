@@ -17,8 +17,10 @@ from reading_assistant.graph.agent import (
     AgentBudget,
     ToolBox,
     _to_chunk,
+    build_agent_plan,
     merge_agent_chunks,
     run_agent_loop,
+    verify_agent_evidence,
 )
 from reading_assistant.rag import RetrievedChunk
 from reading_assistant.storage.vector_store import (
@@ -36,33 +38,52 @@ DOC_ID = 7
 
 def _store() -> InMemoryVectorStore:
     store = InMemoryVectorStore()
-    store.add([
-        StoredChunk(
-            id='doc7-h-10', text='却说三藏骑马前行，忽见一只老虎精，唤作寅将军。',
-            metadata={'document_id': DOC_ID, 'chapter_index': 13,
-                      'chapter': '第十三回 陷虎城金星解厄'},
-        ),
-        StoredChunk(
-            id='doc7-h-11', text='寅将军身披锦绣花纹，锯牙凿齿，目光如电。',
-            metadata={'document_id': DOC_ID, 'chapter_index': 13,
-                      'chapter': '第十三回 陷虎城金星解厄'},
-        ),
-        StoredChunk(
-            id='doc7-h-12', text='太白金星化作老叟，拂断绳索救了三藏。',
-            metadata={'document_id': DOC_ID, 'chapter_index': 13,
-                      'chapter': '第十三回 陷虎城金星解厄'},
-        ),
-        StoredChunk(
-            id='doc7-h-40', text='第四十回 婴儿戏化禅心乱，红孩儿登场。',
-            metadata={'document_id': DOC_ID, 'chapter_index': 40,
-                      'chapter': '第四十回 婴儿戏化禅心乱'},
-        ),
-        # 前言：含「寅将军」但**不是正文回目** —— 序数判断必须把它排除
-        StoredChunk(
-            id='doc7-h-02', text='前言：本书讲唐僧师徒西行，寅将军是最早出场的妖怪之一。',
-            metadata={'document_id': DOC_ID, 'chapter_index': 2, 'chapter': '前言'},
-        ),
-    ])
+    store.add(
+        [
+            StoredChunk(
+                id='doc7-h-10',
+                text='却说三藏骑马前行，忽见一只老虎精，唤作寅将军。',
+                metadata={
+                    'document_id': DOC_ID,
+                    'chapter_index': 13,
+                    'chapter': '第十三回 陷虎城金星解厄',
+                },
+            ),
+            StoredChunk(
+                id='doc7-h-11',
+                text='寅将军身披锦绣花纹，锯牙凿齿，目光如电。',
+                metadata={
+                    'document_id': DOC_ID,
+                    'chapter_index': 13,
+                    'chapter': '第十三回 陷虎城金星解厄',
+                },
+            ),
+            StoredChunk(
+                id='doc7-h-12',
+                text='太白金星化作老叟，拂断绳索救了三藏。',
+                metadata={
+                    'document_id': DOC_ID,
+                    'chapter_index': 13,
+                    'chapter': '第十三回 陷虎城金星解厄',
+                },
+            ),
+            StoredChunk(
+                id='doc7-h-40',
+                text='第四十回 婴儿戏化禅心乱，红孩儿登场。',
+                metadata={
+                    'document_id': DOC_ID,
+                    'chapter_index': 40,
+                    'chapter': '第四十回 婴儿戏化禅心乱',
+                },
+            ),
+            # 前言：含「寅将军」但**不是正文回目** —— 序数判断必须把它排除
+            StoredChunk(
+                id='doc7-h-02',
+                text='前言：本书讲唐僧师徒西行，寅将军是最早出场的妖怪之一。',
+                metadata={'document_id': DOC_ID, 'chapter_index': 2, 'chapter': '前言'},
+            ),
+        ]
+    )
     return store
 
 
@@ -105,10 +126,14 @@ def _toolbox(store=None) -> ToolBox:
 
 def test_to_chunk_accepts_search_hit() -> None:
     """SearchHit：id + metadata 字典。"""
-    chunk = _to_chunk(SearchHit(
-        id='c1', score=0.5, text='正文',
-        metadata={'document_id': 1, 'chapter': '甲', 'chapter_index': 2},
-    ))
+    chunk = _to_chunk(
+        SearchHit(
+            id='c1',
+            score=0.5,
+            text='正文',
+            metadata={'document_id': 1, 'chapter': '甲', 'chapter_index': 2},
+        )
+    )
     assert chunk['chunk_id'] == 'c1'
     assert chunk['document_id'] == 1
     assert chunk['chapter_index'] == 2
@@ -121,10 +146,16 @@ def test_to_chunk_accepts_flat_retrieved_chunk() -> None:
     AttributeError，而工具级 try/except 把它变成「工具执行失败」的观察 ——
     **检索静默降级**，日志上只是 new_chunks=0。
     """
-    chunk = _to_chunk(RetrievedChunk(
-        chunk_id='c9', score=0.42, text='正文',
-        document_id=3, chapter='乙', chapter_index=7,
-    ))
+    chunk = _to_chunk(
+        RetrievedChunk(
+            chunk_id='c9',
+            score=0.42,
+            text='正文',
+            document_id=3,
+            chapter='乙',
+            chapter_index=7,
+        )
+    )
     assert chunk['chunk_id'] == 'c9'
     assert chunk['document_id'] == 3
     assert chunk['chapter'] == '乙'
@@ -211,8 +242,11 @@ def test_coalesce_chapter_keeps_every_chunk_text() -> None:
     from reading_assistant.storage.vector_store import StoredChunk
 
     chunks = [
-        StoredChunk(id=f'd1-{i}', text='甲' * 1500,
-                    metadata={'document_id': 1, 'chapter': '第一回', 'chapter_index': 1})
+        StoredChunk(
+            id=f'd1-{i}',
+            text='甲' * 1500,
+            metadata={'document_id': 1, 'chapter': '第一回', 'chapter_index': 1},
+        )
         for i in range(4)
     ]
     segments = coalesce_chapter(chunks, max_chars=4000)
@@ -235,7 +269,7 @@ def test_read_chapter_fits_long_chapter_in_few_slots() -> None:
     **一整章塞不下**，丢哪段取决于顺序（靠运气）。合并成分段后一章只占 2~3 个名额。
     """
     result = _toolbox().call('read_chapter', {'chapter_index': 13})
-    assert len(result.chunks) <= 3, f'整章应只占少量名额，实际 {len(result.chunks)}' 
+    assert len(result.chunks) <= 3, f'整章应只占少量名额，实际 {len(result.chunks)}'
 
 
 def test_read_chapter_rejects_bad_argument() -> None:
@@ -252,7 +286,8 @@ def test_list_chapters_lists_all_in_order() -> None:
     result = _toolbox().call('list_chapters', {})
     indexes = [
         int(line.split('chapter_index=')[1].split()[0])
-        for line in result.observation.splitlines() if 'chapter_index=' in line
+        for line in result.observation.splitlines()
+        if 'chapter_index=' in line
     ]
     assert indexes == sorted(indexes)
     assert indexes == [2, 13, 40]  # 含前言（chapter_index=2）
@@ -267,6 +302,7 @@ def test_unknown_tool_returns_structured_error() -> None:
 
 def test_tool_exception_is_contained() -> None:
     """工具内部异常 → 结构化错误（项目原则：模型读得到才能自我修正）。"""
+
     def boom(_query):
         raise RuntimeError('底层检索炸了')
 
@@ -281,10 +317,12 @@ def test_tool_exception_is_contained() -> None:
 
 
 def test_loop_stops_on_finish() -> None:
-    model = ScriptedModel([
-        [{'name': 'grep', 'args': {'term': '寅将军'}}],
-        [{'name': 'finish', 'args': {'reason': '够了'}}],
-    ])
+    model = ScriptedModel(
+        [
+            [{'name': 'grep', 'args': {'term': '寅将军'}}],
+            [{'name': 'finish', 'args': {'reason': '够了'}}],
+        ]
+    )
     run = run_agent_loop(model=model, toolbox=_toolbox(), question='第一个妖怪是谁？')
     assert run.finished is True
     assert run.stopped_by == 'finish'
@@ -301,11 +339,12 @@ def test_loop_answers_every_tool_call_in_a_round() -> None:
      responding to each 'tool_call_id'"
     实测模型很自然地一次返回两个（search + list_chapters）。
     """
-    model = ScriptedModel([
-        [{'name': 'grep', 'args': {'term': '寅将军'}},
-         {'name': 'list_chapters', 'args': {}}],
-        [{'name': 'finish', 'args': {'reason': 'ok'}}],
-    ])
+    model = ScriptedModel(
+        [
+            [{'name': 'grep', 'args': {'term': '寅将军'}}, {'name': 'list_chapters', 'args': {}}],
+            [{'name': 'finish', 'args': {'reason': 'ok'}}],
+        ]
+    )
     run_agent_loop(model=model, toolbox=_toolbox(), question='q')
     second_round = model.seen_messages[1]
     tool_messages = [m for m in second_round if type(m).__name__ == 'ToolMessage']
@@ -317,7 +356,9 @@ def test_loop_respects_max_steps() -> None:
     """预算硬上限：模型一直不停也必须被截断。"""
     model = ScriptedModel([[{'name': 'grep', 'args': {'term': '寅将军'}}] for _ in range(20)])
     run = run_agent_loop(
-        model=model, toolbox=_toolbox(), question='q',
+        model=model,
+        toolbox=_toolbox(),
+        question='q',
         budget=AgentBudget(max_steps=3),
     )
     assert run.steps == 3
@@ -333,6 +374,7 @@ def test_loop_stops_when_model_returns_no_tool_call() -> None:
 
 def test_loop_survives_model_exception() -> None:
     """agent 是增强项：模型异常要能回退，不能把整次问答带崩。"""
+
     class BoomModel:
         def bind_tools(self, tools):
             return self
@@ -354,33 +396,68 @@ def test_loop_dedups_chunks_and_leaves_capping_to_merge() -> None:
     实测：工具共贡献 31 条，到 merge 只剩 16 条，而答案在「第二章第 8 段」。
     累计不设限（只是些轻量 dict），裁剪交给知道来源优先级的 merge。
     """
-    model = ScriptedModel([
-        [{'name': 'grep', 'args': {'term': '寅将军'}}],
-        [{'name': 'grep', 'args': {'term': '寅将军'}}],
-        [{'name': 'finish', 'args': {'reason': 'ok'}}],
-    ])
+    model = ScriptedModel(
+        [
+            [{'name': 'grep', 'args': {'term': '寅将军'}}],
+            [{'name': 'grep', 'args': {'term': '寅将军'}}],
+            [{'name': 'finish', 'args': {'reason': 'ok'}}],
+        ]
+    )
     run = run_agent_loop(
-        model=model, toolbox=_toolbox(), question='q',
+        model=model,
+        toolbox=_toolbox(),
+        question='q',
         budget=AgentBudget(max_steps=6, max_chunks=2),
     )
     ids = [c['chunk_id'] for c in run.chunks]
     assert len(ids) == len(set(ids)), '同一片段不该重复'
-    assert len(ids) > 2, '循环不应按 max_chunks 截断（裁剪是 merge 的职责）' 
+    assert len(ids) > 2, '循环不应按 max_chunks 截断（裁剪是 merge 的职责）'
 
 
 def test_loop_records_trace_for_observability() -> None:
-    model = ScriptedModel([
-        [{'name': 'grep', 'args': {'term': '寅将军'}}],
-        [{'name': 'finish', 'args': {'reason': 'ok'}}],
-    ])
+    model = ScriptedModel(
+        [
+            [{'name': 'grep', 'args': {'term': '寅将军'}}],
+            [{'name': 'finish', 'args': {'reason': 'ok'}}],
+        ]
+    )
     run = run_agent_loop(model=model, toolbox=_toolbox(), question='q')
     assert run.trace and run.trace[0]['action'] == 'grep'
     assert 'observation_chars' in run.trace[0]
 
 
+def test_agent_builds_plan_and_verifies_evidence() -> None:
+    plan = build_agent_plan('第一个妖怪是谁？')
+    assert '章节顺序' in plan['success_criteria'][1]
+    verified = verify_agent_evidence(
+        '第一个妖怪是谁？',
+        [{'chunk_id': 'c1', 'chapter_index': 13, 'text': '寅将军'}],
+        finished=True,
+    )
+    assert verified['status'] == 'verified'
+    assert verified['has_chapter_order'] is True
+
+
+def test_toolbox_caches_repeat_read_only_tool_call() -> None:
+    box = _toolbox()
+    first = box.call('grep', {'term': '寅将军'})
+    second = box.call('grep', {'term': '寅将军'})
+    assert first == second
+    assert box.cache_hits == 1
+    assert box.last_cache_hit is True
+
+
 def test_tool_schemas_are_exposed() -> None:
     names = {t.name for t in AGENT_TOOLS}
-    assert names == {'search', 'grep', 'list_chapters', 'read_chapter', 'finish'}
+    assert names == {'search', 'grep', 'list_chapters', 'read_chapter', 'graph_lookup', 'finish'}
+
+
+def test_graph_lookup_returns_source_evidence() -> None:
+    result = _toolbox().call('graph_lookup', {'entity': '寅将军'})
+    assert '共现关系' in result.observation
+    assert result.chunks
+    assert result.chunks[0]['source'] == 'graph_lookup'
+    assert result.chunks[0]['chapter_index'] == 13
 
 
 # --------------------------------------------------------------- where 组装
@@ -526,8 +603,9 @@ def test_merge_honours_exact_reserve_quota() -> None:
     （它们占着最前面几个位置），截断后 agent 原封不动、只给原有片段留了 2 个空位。
     必须显式分三段取：agent（≤cap-reserve）→ 原有（拿满 reserve）→ 空位回填 agent。
     """
-    agent = ([{'chunk_id': f'ag-{i}', 'text': 'x', 'source': 'grep'} for i in range(8)]
-             + [{'chunk_id': f'ch-{i}', 'text': 'x', 'source': 'read_chapter'} for i in range(3)])
+    agent = [{'chunk_id': f'ag-{i}', 'text': 'x', 'source': 'grep'} for i in range(8)] + [
+        {'chunk_id': f'ch-{i}', 'text': 'x', 'source': 'read_chapter'} for i in range(3)
+    ]
     originals = [{'chunk_id': f'or-{i}', 'text': 'x'} for i in range(12)]
 
     out = merge_agent_chunks(agent, originals, cap=16)
@@ -551,6 +629,7 @@ def test_merge_backfills_with_agent_when_originals_are_short() -> None:
 
 # ------------------------------------- B：反漂移护栏（2026-09-24 实测失败）
 
+
 def _broad_store() -> InMemoryVectorStore:
     """50 条含「女子」的块 —— 复现 `grep '女子'` 的过宽现场。
 
@@ -559,15 +638,20 @@ def _broad_store() -> InMemoryVectorStore:
     阈值 `_BROAD_GREP_MAX_HITS = 40` 就是按这两组分开定的。
     """
     store = InMemoryVectorStore()
-    store.add([
-        StoredChunk(
-            id=f'doc7-broad-{i}',
-            text=f'第{i}处：路旁闪出一个女子。',
-            metadata={'document_id': DOC_ID, 'chapter_index': 100 + i,
-                      'chapter': f'第{100 + i}回 测试回目'},
-        )
-        for i in range(50)
-    ])
+    store.add(
+        [
+            StoredChunk(
+                id=f'doc7-broad-{i}',
+                text=f'第{i}处：路旁闪出一个女子。',
+                metadata={
+                    'document_id': DOC_ID,
+                    'chapter_index': 100 + i,
+                    'chapter': f'第{100 + i}回 测试回目',
+                },
+            )
+            for i in range(50)
+        ]
+    )
     return store
 
 
@@ -596,16 +680,21 @@ def test_grep_broadness_is_judged_per_term_not_by_sum() -> None:
     几个各 20 余条的窄词合计就过线了。
     """
     store = InMemoryVectorStore()
-    store.add([
-        StoredChunk(
-            id=f'doc7-mix-{side}-{i}',
-            text=f'测试文本 {side}号词 {i}',
-            metadata={'document_id': DOC_ID, 'chapter_index': 200 + i,
-                      'chapter': f'第{200 + i}回 测试回目'},
-        )
-        for side in ('甲', '乙')
-        for i in range(25)
-    ])
+    store.add(
+        [
+            StoredChunk(
+                id=f'doc7-mix-{side}-{i}',
+                text=f'测试文本 {side}号词 {i}',
+                metadata={
+                    'document_id': DOC_ID,
+                    'chapter_index': 200 + i,
+                    'chapter': f'第{200 + i}回 测试回目',
+                },
+            )
+            for side in ('甲', '乙')
+            for i in range(25)
+        ]
+    )
     result = _toolbox(store).call('grep', {'term': '甲号词,乙号词'})
     assert '⚠️' not in result.observation, (
         '合计 50 条 > 阈值，但每个词只有 25 条 —— 按合计判会误伤多候选枚举'
@@ -645,16 +734,14 @@ def test_read_chapter_still_works_without_chapter_index_table(monkeypatch) -> No
 
 # ------------------------------------- C：未收敛时不得淘汰最早发现的证据
 
+
 def _run_shape():
     """2026-09-24 那次的真实形状：step1 命中正解，之后 5 步全在漂移，originals 为空。"""
     early = [
         {'chunk_id': 'c1', 'text': '瞽者', 'chapter_index': 40},
         {'chunk_id': 'c2', 'text': '女王远送、路旁闪出一个女子', 'chapter_index': 60},
     ]
-    noise = [
-        {'chunk_id': f'c{i}', 'text': '白骨精', 'chapter_index': 32}
-        for i in range(3, 38)
-    ]
+    noise = [{'chunk_id': f'c{i}', 'text': '白骨精', 'chapter_index': 32} for i in range(3, 38)]
     return early, noise
 
 
@@ -683,4 +770,3 @@ def test_merge_recency_priority_is_unchanged_when_converged() -> None:
     ids = [c['chunk_id'] for c in merged]
     assert 'c1' not in ids and 'c2' not in ids
     assert 'c37' in ids, '收敛时仍然是「最新优先」'
-

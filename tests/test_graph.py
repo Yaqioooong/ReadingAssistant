@@ -139,9 +139,7 @@ class TestIngestGraph:
         assert second['document_id'] == first['document_id']
         assert store.count() == first['chunk_count']
 
-    def test_duplicate_upload_keeps_document_indexed(
-        self, session_factory, tmp_path: Path
-    ) -> None:
+    def test_duplicate_upload_keeps_document_indexed(self, session_factory, tmp_path: Path) -> None:
         """回归：重复上传（dup=True 且未 force）不得把文档打回 indexing。
 
         ``route_after_add`` 在重复时直接 END，没有任何节点会再把 index_status 写回
@@ -171,9 +169,7 @@ class TestIngestGraph:
         finally:
             session.close()
 
-    def test_force_reindex_overrides_duplicate_lease(
-        self, session_factory, tmp_path: Path
-    ) -> None:
+    def test_force_reindex_overrides_duplicate_lease(self, session_factory, tmp_path: Path) -> None:
         """force=True 时即使命中 file_hash 也要重新走 chunk_and_index（保持 indexed）。"""
         store = InMemoryVectorStore()
         graph = build_ingest_graph(session_factory, store, embedding_model=FakeEmbeddings())
@@ -238,6 +234,41 @@ class TestQaGraph:
         messages = session.scalars(select(ChatMessage).order_by(ChatMessage.id)).all()
         assert {message.role for message in messages} == {'user', 'assistant'}
         assert messages[-1].meta['citations']
+
+    def test_multi_question_fanout_keeps_subquestion_evidence(
+        self, session_factory, session
+    ) -> None:
+        session_id = self._make_session(session)
+        with session_factory() as seed:
+            seed.add(
+                Document(
+                    filename='book.txt',
+                    title='book',
+                    file_hash='f-multi',
+                    content_hash='c-multi',
+                    index_status='indexed',
+                )
+            )
+            seed.commit()
+        graph = build_qa_graph(
+            session_factory,
+            _populated_store(),
+            llm=FakeLLM(),
+            embedding_model=FakeEmbeddings([1.0, 0.0]),
+        )
+
+        result = graph.invoke(
+            {'question': '1. 张三是谁？ 2. 李四发生了什么？', 'session_id': session_id},
+            config={'configurable': {'thread_id': 'qa-multi'}},
+        )
+
+        assert result['answer'] == '这是基于原文的测试回答。'
+        assert [item['id'] for item in result['subquestions']] == ['q1', 'q2']
+        assert all(item['status'] == 'evidence_ready' for item in result['subquestions'])
+        assert result['citations']
+        assert result['citations'][0]['subquestion_id'] == 'q1'
+        assert result['citations'][-1]['subquestion_id'] == 'q2'
+        assert result['evidence_verification']['status'] == 'needs_review'
 
     def test_hitl_when_no_chunks(self, session_factory, session) -> None:
         session_id = self._make_session(session)
@@ -312,7 +343,7 @@ class TestQaGraph:
 
         graph = build_qa_graph(
             session_factory,
-            InMemoryVectorStore(),          # 空库 → 无片段 → 判「信息不足」
+            InMemoryVectorStore(),  # 空库 → 无片段 → 判「信息不足」
             llm=FakeLLM('恢复后的回答。'),
             embedding_model=FakeEmbeddings([1.0, 0.0]),
         )

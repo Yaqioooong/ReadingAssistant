@@ -5,6 +5,7 @@
 2. **确定性** —— ``merge_state`` 是纯函数，模型不参与记忆生成；
 3. **幂等** —— 字段是本轮输入的函数，``turn_count`` 从消息表数出而非自增。
 """
+
 from __future__ import annotations
 
 import json
@@ -16,6 +17,7 @@ from reading_assistant.graph.state import (
     ConversationState,
     from_json,
     load_conversation_state,
+    make_context_fingerprint,
     merge_state,
     save_conversation_state,
     to_json,
@@ -67,11 +69,31 @@ class TestMergeState:
         assert prev.last_question == 'q'
         assert merged.last_question == 'r'
 
+    def test_working_memory_fields_roundtrip_and_clear_unresolved(self) -> None:
+        prev = ConversationState(
+            active_entities=['孙悟空'],
+            active_topic='孙悟空的结局',
+            temporal_anchor={'text': '后来'},
+            confirmed_facts=[{'text': '孙悟空被唐僧收服', 'citations': ['c1']}],
+            unresolved_references=['它是谁？'],
+        )
+        merged = merge_state(prev, {'unresolved_references': []})
+        assert merged.active_entities == ['孙悟空']
+        assert merged.temporal_anchor == {'text': '后来'}
+        assert merged.confirmed_facts[0]['citations'] == ['c1']
+        assert merged.unresolved_references == []
+
 
 class TestSerialization:
     def test_roundtrip(self) -> None:
         state = ConversationState(active_documents=['a'], last_question='q', turn_count=2)
         assert from_json(to_json(state)) == state
+
+    def test_context_fingerprint_changes_with_working_memory(self) -> None:
+        first = ConversationState(active_entities=['孙悟空'], active_topic='结局')
+        second = ConversationState(active_entities=['白骨精'], active_topic='结局')
+        assert make_context_fingerprint(first) != make_context_fingerprint(second)
+        assert make_context_fingerprint(first) == make_context_fingerprint(first)
 
     def test_json_keeps_chinese_readable(self) -> None:
         """ensure_ascii=False —— 库里要能直接看懂，排查时才不用先解码。"""

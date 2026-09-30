@@ -20,8 +20,10 @@
 ①在 ``ConversationState`` 加字段；②调用方把新信号塞进 ``patch``。
 机制（schema + 确定性合并 + 落库）完全不变。
 """
+
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -44,6 +46,11 @@ class ConversationState:
     # 注意：是「谈过的书」不是「当前话题」。换书不该抹掉上一本，
     # 因为这个字段的意义就是承接被窗口挤掉的东西。合并策略见 qa._merge_active_documents。
     active_documents: list[str] = field(default_factory=list)
+    active_entities: list[str] = field(default_factory=list)
+    active_topic: str | None = None
+    temporal_anchor: dict[str, str | int] | None = None
+    confirmed_facts: list[dict[str, Any]] = field(default_factory=list)
+    unresolved_references: list[str] = field(default_factory=list)
     last_question: str | None = None
     last_intent: str | None = None
     pending_clarification: str | None = None
@@ -52,9 +59,7 @@ class ConversationState:
     turn_count: int = 0
 
 
-def merge_state(
-    prev: ConversationState | None, patch: dict[str, Any] | None
-) -> ConversationState:
+def merge_state(prev: ConversationState | None, patch: dict[str, Any] | None) -> ConversationState:
     """把 ``patch`` 确定性地并入 ``prev``。纯函数，无 IO、无模型调用。
 
     三条语义（都有单测钉死）：
@@ -71,6 +76,9 @@ def merge_state(
         if key not in data:
             logger.debug('会话状态忽略未知键:%s', key)
             continue
+        if key == 'unresolved_references' and value == []:
+            data[key] = []
+            continue
         if value is None or value == '' or value == []:
             continue
         data[key] = value
@@ -80,6 +88,31 @@ def merge_state(
 def to_json(state: ConversationState) -> str:
     """序列化落库。``ensure_ascii=False`` 让库里能直接看懂内容。"""
     return json.dumps(asdict(state), ensure_ascii=False)
+
+
+def make_context_fingerprint(
+    state: ConversationState | dict[str, Any] | None,
+    extra_entities: list[str] | None = None,
+) -> str:
+    """生成稳定的工作记忆指纹，用于隔离上下文依赖型缓存。
+
+    只包含有界的结构化状态，不包含整段历史原文和当前问题；这样同一上下文
+    下的重复追问仍可命中，而不同实体/时间锚点不会复用彼此的答案。
+    """
+    if isinstance(state, ConversationState):
+        data = asdict(state)
+    else:
+        data = dict(state or {})
+    payload = {
+        'active_entities': list(data.get('active_entities') or [])[-8:],
+        'active_topic': data.get('active_topic'),
+        'temporal_anchor': data.get('temporal_anchor'),
+        'confirmed_facts': list(data.get('confirmed_facts') or [])[-6:],
+        'unresolved_references': list(data.get('unresolved_references') or [])[-4:],
+        'extra_entities': list(extra_entities or []),
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
 def from_json(raw: str | None) -> ConversationState | None:

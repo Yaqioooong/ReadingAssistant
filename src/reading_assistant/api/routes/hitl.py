@@ -73,6 +73,11 @@ def submit_clarification(
                     schemas.CitationOut(**c) if isinstance(c, dict) else c
                     for c in ((prior.meta or {}).get('citations') or [])
                 ],
+                'subquestions': (prior.meta or {}).get('subquestions') or [],
+                'evidence_verification': (prior.meta or {}).get('evidence_verification'),
+                'agent_plan': (prior.meta or {}).get('agent_plan'),
+                'agent_verification': (prior.meta or {}).get('agent_verification'),
+                'agent_actions': (prior.meta or {}).get('agent_actions') or [],
             })
         raise HTTPException(status_code=400, detail=f'任务已处理: {task_id}')
 
@@ -121,6 +126,13 @@ def submit_clarification(
             for c in (result.get('citations') or [])
         ],
         'needs_clarification': bool(result.get('needs_clarification')),
+        'subquestions': result.get('subquestions') or [],
+        'evidence_verification': result.get('evidence_verification'),
+        'agent_plan': result.get('agent_plan'),
+        'agent_verification': result.get('agent_verification'),
+        'agent_actions': [
+            item.get('action', '') for item in (result.get('agent_trace') or [])
+        ],
     })
 
 

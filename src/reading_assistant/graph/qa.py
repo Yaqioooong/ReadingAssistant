@@ -28,8 +28,16 @@ from reading_assistant.graph.agent import (
     merge_agent_chunks,
     run_agent_loop,
 )
+from reading_assistant.graph.evidence import (
+    judge_evidence,
+    remove_invalid_citations,
+    verify_answer_claims,
+)
 from reading_assistant.graph.intent import build_prototype_router, route_fast
+from reading_assistant.graph.query import SubQuestion, analyze_question
 from reading_assistant.graph.rewrite import (
+    detect_pronoun,
+    extract_entities,
     is_descriptive_anaphora,
 )
 from reading_assistant.graph.rewrite import (
@@ -37,6 +45,7 @@ from reading_assistant.graph.rewrite import (
 )
 from reading_assistant.graph.state import (
     load_conversation_state,
+    make_context_fingerprint,
     merge_state,
     save_conversation_state,
 )
@@ -88,6 +97,7 @@ class QAState(TypedDict, total=False):
     conv_state: dict | None  # 会话结构化状态(替代滚动摘要, 见 graph/state.py)
     resolved_question: str | None  # 指代消解后的**检索/缓存**查询（无改写时等于 question）
     cqr_entities: list[str] | None  # 本轮改写并入的上文实体（供观测/评测）
+    context_fingerprint: str | None  # 上下文依赖问题的工作记忆指纹
     cqr_anaphora: bool  # 本轮走的是「定指描述回指」路径（决定是否给 agent 一次机会）
     intent: str | None  # gate 分类结果: book | history | chat
     cache_channel: str | None  # exact | semantic | identifier | miss | disabled
@@ -100,6 +110,12 @@ class QAState(TypedDict, total=False):
     agent_used: bool  # 本问题是否已用过 agent（每题至多一次，防循环放大成本）
     agent_trace: list[dict] | None  # 每步 Thought→Action→Observation 摘要（供观测）
     agent_steps: int  # agent 实际执行的步数
+    agent_plan: dict | None
+    agent_verification: dict | None
+    agent_cache_hits: int
+    multi_question: bool
+    subquestions: list[SubQuestion]
+    evidence_verification: dict | None
 
 
 def interrupt_payload(result: dict | None) -> dict | None:
@@ -320,10 +336,34 @@ def _state_section(conv_state: dict | None) -> str:
     """
     if not conv_state:
         return ''
+    lines: list[str] = []
     docs = [str(d) for d in (conv_state.get('active_documents') or []) if d]
-    if not docs:
-        return ''
-    return '【本会话涉及书籍】' + '、'.join(docs)
+    if docs:
+        lines.append('【本会话涉及书籍】' + '、'.join(docs))
+    entities = [str(e) for e in (conv_state.get('active_entities') or []) if e]
+    if entities:
+        lines.append('【当前实体】' + '、'.join(entities[-8:]))
+    topic = str(conv_state.get('active_topic') or '').strip()
+    if topic:
+        lines.append(f'【当前主题】{_clip_tokens(topic, 80)}')
+    anchor = conv_state.get('temporal_anchor') or {}
+    if anchor.get('text'):
+        lines.append(f'【时间锚点】{anchor["text"]}')
+    facts = conv_state.get('confirmed_facts') or []
+    if facts:
+        fact_lines = []
+        for fact in facts[-3:]:
+            text = str(fact.get('text') or '').strip()
+            if text:
+                fact_lines.append(f'- {text}')
+        if fact_lines:
+            lines.append('【已确认事实】\n' + '\n'.join(fact_lines))
+    unresolved = [str(item) for item in (conv_state.get('unresolved_references') or []) if item]
+    if unresolved:
+        lines.append('【未解决指代】' + '、'.join(unresolved[-4:]))
+    return '\n'.join(lines)
+
+
 def _build_gate_prompt(
     question: str,
     history: list[dict] | None,
@@ -498,6 +538,9 @@ def _full_question_text(question: str, clarification: str | None) -> str:
 
 
 _ACTIVE_DOCUMENTS_CAP = 8  # 会话状态里记住的书名上限
+_ACTIVE_ENTITIES_CAP = 12
+_CONFIRMED_FACTS_CAP = 12
+_UNRESOLVED_REFERENCES_CAP = 4
 
 
 def _merge_active_documents(prev: list[str], current: list[str]) -> list[str]:
@@ -516,6 +559,44 @@ def _merge_active_documents(prev: list[str], current: list[str]) -> list[str]:
     return merged[-_ACTIVE_DOCUMENTS_CAP:]
 
 
+def _merge_unique(prev: list[str], current: list[str], cap: int) -> list[str]:
+    merged = list(prev)
+    for value in current:
+        if value and value not in merged:
+            merged.append(value)
+    return merged[-cap:]
+
+
+def _temporal_anchor(question: str) -> dict[str, str] | None:
+    """提取可解释的时间/顺序锚点，不让模型生成不可审计的摘要。"""
+    patterns = (
+        r'第[一二三四五六七八九十百千万0-9]+[章节回]',
+        r'(?:第一次|第二次|第三次|最初|后来|之后|以前|最终|最后|随后)',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, question or '')
+        if match:
+            return {'text': match.group(0)}
+    return None
+
+
+def _fact_from_state(state: QAState) -> dict | None:
+    answer = sanitize_model_text(state.get('answer') or '').strip()
+    citations = [
+        str(c.get('chunk_id')) for c in (state.get('citations') or []) if c.get('chunk_id')
+    ]
+    if not answer or not citations:
+        return None
+    verification = state.get('evidence_verification') or {}
+    if verification.get('status') in {'needs_review', 'repaired_needs_review'}:
+        return None
+    return {
+        'text': answer[:500],
+        'question': state.get('question') or '',
+        'citations': citations[:8],
+    }
+
+
 def _persist_conversation_state(session: Session, sid: int, state: QAState) -> None:
     """把本轮已有信号**确定性地**并入会话状态并落库。零 LLM 成本。
 
@@ -532,6 +613,23 @@ def _persist_conversation_state(session: Session, sid: int, state: QAState) -> N
         list(prev.active_documents) if prev else [],
         list(dict.fromkeys(doc_titles.values())),  # 去重保序
     )
+    question = state.get('question') or ''
+    entities = list(state.get('cqr_entities') or [])
+    entities.extend(extract_entities(question, limit=6))
+    merged_entities = _merge_unique(
+        list(prev.active_entities) if prev else [],
+        list(dict.fromkeys(entities)),
+        _ACTIVE_ENTITIES_CAP,
+    )
+    current_topic = state.get('resolved_question') or question
+    anchor = _temporal_anchor(current_topic)
+    unresolved = []
+    if detect_pronoun(question) and not state.get('cqr_entities'):
+        unresolved.append(question[:200])
+    previous_facts = list(prev.confirmed_facts) if prev else []
+    fact = _fact_from_state(state)
+    if fact:
+        previous_facts.append(fact)
     turn_count = (
         session.scalar(
             select(func.count(ChatMessage.id)).where(
@@ -543,6 +641,20 @@ def _persist_conversation_state(session: Session, sid: int, state: QAState) -> N
     )
     patch = {
         'active_documents': merged_docs,
+        'active_entities': merged_entities,
+        'active_topic': current_topic[:200] if current_topic else None,
+        'temporal_anchor': anchor,
+        'confirmed_facts': previous_facts[-_CONFIRMED_FACTS_CAP:],
+        # 成功完成 CQR 后清掉旧的未解决指代；普通轮次则保留最近的待处理项。
+        'unresolved_references': (
+            []
+            if state.get('cqr_entities')
+            else _merge_unique(
+                list(prev.unresolved_references) if prev else [],
+                unresolved,
+                _UNRESOLVED_REFERENCES_CAP,
+            )
+        ),
         'last_question': state.get('question'),
         'last_intent': state.get('intent'),
         'pending_clarification': state.get('clarification'),
@@ -643,6 +755,7 @@ def build_qa_graph(
             + normalize_question(state.get('clarification') or '')
             + '|'
             + str(state.get('document_id') or '')
+            + ('|ctx|' + state['context_fingerprint'] if state.get('context_fingerprint') else '')
         )
         with session_scope(session_factory) as session:
             doc_id = state.get('document_id')
@@ -1078,6 +1191,15 @@ def build_qa_graph(
                         content=state['answer'],
                         meta={
                             'citations': state.get('citations') or [],
+                            'subquestions': state.get('subquestions') or [],
+                            'evidence_verification': state.get('evidence_verification'),
+                            'agent_plan': state.get('agent_plan'),
+                            'agent_verification': state.get('agent_verification'),
+                            'agent_actions': [
+                                item.get('action', '')
+                                for item in (state.get('agent_trace') or [])
+                            ],
+                            'agent_cache_hits': state.get('agent_cache_hits') or 0,
                             'cache_hit': bool(state.get('cache_hit')),
                             'cache_channel': state.get('cache_channel'),
                         },
@@ -1163,8 +1285,12 @@ def build_qa_graph(
         cost_ms = (time.perf_counter() - start) * 1000
         logger.info(
             '问答[agent] q=%.30s steps=%d stopped=%s finished=%s chunks=%d (%.0fms)',
-            state['question'], run.steps, run.stopped_by, run.finished,
-            len(run.chunks), cost_ms,
+            state['question'],
+            run.steps,
+            run.stopped_by,
+            run.finished,
+            len(run.chunks),
+            cost_ms,
         )
 
         # 合并策略：agent 片段优先，但保证原有片段不被清空（见 merge_agent_chunks 的说明）
@@ -1177,13 +1303,15 @@ def build_qa_graph(
             converged=run.finished,
         )
         kept_original = sum(
-            1 for c in merged
-            if str(c.get('chunk_id') or '') in
-            {str(o.get('chunk_id') or '') for o in (state.get('chunks') or [])}
+            1
+            for c in merged
+            if str(c.get('chunk_id') or '')
+            in {str(o.get('chunk_id') or '') for o in (state.get('chunks') or [])}
         )
         logger.info(
             '问答[agent] 合并后 %d 条（其中原有 %d 条）—— 保证原有片段不被清空',
-            len(merged), kept_original,
+            len(merged),
+            kept_original,
         )
         return {
             'chunks': merged,
@@ -1191,6 +1319,9 @@ def build_qa_graph(
             'agent_used': True,
             'agent_trace': list(run.trace),
             'agent_steps': run.steps,
+            'agent_plan': dict(run.plan),
+            'agent_verification': dict(run.verification),
+            'agent_cache_hits': run.cache_hits,
             'needs_clarification': False,  # 交给 answer 重新判定
         }
 
@@ -1279,12 +1410,180 @@ def build_qa_graph(
             conv_state = load_conversation_state(session, sid)
         logger.info(
             '问答[上下文] 原文窗口 %d 条（预算 %d token，取回 %d 条）',
-            len(history), settings.history_token_budget, len(rows),
+            len(history),
+            settings.history_token_budget,
+            len(rows),
         )
         return {
             'history': history,
             # 落成纯 dict 进 state：LangGraph checkpoint 序列化对非基础类型很敏感
             'conv_state': asdict(conv_state) if conv_state else None,
+        }
+
+    def analyze_query(state: QAState) -> dict:
+        multi, subquestions = analyze_question(state['question'])
+        if multi:
+            logger.info('问答[拆题] q=%.40s subquestions=%d', state['question'], len(subquestions))
+        return {'multi_question': multi, 'subquestions': subquestions}
+
+    def multi_retrieve(state: QAState) -> dict:
+        """每个子问题独立检索，避免一个问题的片段淹没另一个问题。"""
+        from concurrent.futures import ThreadPoolExecutor
+
+        doc_ids = state.get('document_ids') or []
+        settings = get_settings()
+        with session_scope(session_factory) as session:
+            indexed_ids = set(list_indexed_document_ids(session))
+
+        def retrieve_one(item: SubQuestion) -> SubQuestion:
+            question = item['question']
+            try:
+                if len(doc_ids) > 1:
+                    per_doc = max(2, -(-settings.top_k // len(doc_ids)))
+                    hits = []
+                    for doc_id in doc_ids:
+                        if doc_id in indexed_ids:
+                            hits.extend(
+                                retriever.retrieve(question, top_k=per_doc, document_id=doc_id)
+                            )
+                    hits = sorted(hits, key=lambda hit: hit.score, reverse=True)[: settings.top_k]
+                else:
+                    hits = retriever.retrieve(
+                        question,
+                        document_id=state.get('document_id'),
+                        top_k=settings.top_k,
+                    )
+                    hits = [hit for hit in hits if hit.document_id in indexed_ids]
+                return {
+                    **item,
+                    'chunks': [_chunk_to_dict(hit) for hit in hits],
+                    'status': 'retrieved' if hits else 'insufficient',
+                }
+            except Exception as exc:  # one subquestion must not erase other answers
+                logger.exception('问答[拆题] 子问题检索失败 q=%s', question)
+                return {**item, 'status': 'error', 'error': str(exc), 'chunks': []}
+
+        items = list(state.get('subquestions') or [])
+        with ThreadPoolExecutor(max_workers=min(len(items), 8)) as executor:
+            results = list(executor.map(retrieve_one, items))
+        titles: dict[int, str] = {}
+        with session_scope(session_factory) as session:
+            wanted = set(doc_ids)
+            for document in list_documents(session):
+                if not wanted or document.id in wanted:
+                    titles[document.id] = document.filename
+        return {'subquestions': results, 'doc_titles': titles or None}
+
+    def multi_judge(state: QAState) -> dict:
+        """对子问题逐个判断证据状态，避免整题共享一个 needs_clarification。"""
+        judged: list[SubQuestion] = []
+        for item in state.get('subquestions') or []:
+            judgement = judge_evidence(item['question'], item.get('chunks') or [])
+            judged.append(
+                {
+                    **item,
+                    'status': judgement['status'],
+                    'evidence_count': judgement['evidence_count'],
+                    'lexical_overlap': judgement['lexical_overlap'],
+                    'missing_info': judgement['missing_info'],
+                }
+            )
+        return {'subquestions': judged}
+
+    def multi_answer(state: QAState) -> dict:
+        """聚合子问题证据；无证据的子问题显式标记，不伪造答案。"""
+        settings = get_settings()
+        titles = dict(state.get('doc_titles') or {})
+        blocks: list[str] = []
+        citations: list[dict] = []
+        source_index = 0
+        updated: list[SubQuestion] = []
+        citation_groups: dict[str, list[dict]] = {}
+        for item in state.get('subquestions') or []:
+            chunks = _select_answer_chunks(
+                item.get('chunks') or [], settings.answer_chunk_token_budget
+            )
+            local_lines = [f'【{item["id"]}】{item["question"]}']
+            if not chunks:
+                local_lines.append('证据：未检索到相关原文片段。')
+                updated.append({**item, 'status': 'insufficient', 'chunks': []})
+                blocks.append('\n'.join(local_lines))
+                continue
+            for chunk in chunks:
+                source_index += 1
+                title = titles.get(chunk.get('document_id'))
+                prefix = f'《{title}》\n' if title else ''
+                local_lines.append(f'证据[{source_index}]\n{prefix}{chunk["text"]}')
+                citations.append(
+                    {
+                        'index': source_index,
+                        'chunk_id': chunk['chunk_id'],
+                        'chapter': chunk.get('chapter'),
+                        'page': None,
+                        'excerpt': chunk['text'][:120],
+                        'document': title,
+                        'subquestion_id': item['id'],
+                    }
+                )
+            citation_groups[item['id']] = citations[-len(chunks) :]
+            updated.append(
+                {
+                    **item,
+                    'status': 'evidence_ready',
+                    'chunks': [],
+                    'evidence_count': len(chunks),
+                    'chunk_ids': [chunk['chunk_id'] for chunk in chunks],
+                }
+            )
+            blocks.append('\n'.join(local_lines))
+
+        prompt = (
+            '你是阅读助手。请仅根据每个子问题下方的原文证据回答。\n'
+            '必须逐项回答，保留【q1】、【q2】等小标题；没有证据的子问题明确说“原文未找到依据”，不要猜测。\n'
+            '引用使用证据编号 [n]，只引用实际支持该句的证据。\n\n' + '\n\n'.join(blocks)
+        )
+        try:
+            response = chat_model.invoke(prompt)
+            content = getattr(response, 'content', None) or str(response)
+        except Exception:
+            logger.exception('问答[拆题] 聚合回答失败')
+            content = '部分子问题已完成检索，但聚合回答失败，请稍后重试。'
+        content = sanitize_model_text(content)
+        used = _used_citation_indexes(content, len(citations))
+        if used:
+            used_set = set(used)
+            citations = [c for c in citations if c['index'] in used_set]
+        content, citations = _renumber_citations(content, citations)
+        visible_ids = {citation['chunk_id'] for citation in citations}
+        citation_by_chunk = {citation['chunk_id']: citation for citation in citations}
+        for item in updated:
+            group = citation_groups.get(item['id'], [])
+            item['citations'] = [
+                citation_by_chunk[citation['chunk_id']]
+                for citation in group
+                if citation['chunk_id'] in visible_ids
+            ]
+        return {'answer': content, 'citations': citations, 'subquestions': updated}
+
+    def verify_multi_answer(state: QAState) -> dict:
+        """校验引用编号和声明支持度；无效引用移除，弱支持只标记不误删。"""
+        answer = state.get('answer') or ''
+        citations = list(state.get('citations') or [])
+        answer, _ = remove_invalid_citations(answer, citations)
+        answer, citations = _renumber_citations(answer, citations)
+        verification = verify_answer_claims(answer, citations)
+        if verification['status'] != 'pass':
+            logger.warning(
+                '问答[证据校验] status=%s invalid=%s weak=%d unsupported=%d',
+                verification['status'],
+                verification['invalid_citations'],
+                len(verification['weak_claims']),
+                len(verification['unsupported_claims']),
+            )
+        return {
+            'answer': answer,
+            'citations': citations,
+            'evidence_verification': verification,
         }
 
     def resolve_query(state: QAState) -> dict:
@@ -1317,13 +1616,26 @@ def build_qa_graph(
         )
         if resolved == question:
             # 无改写 → 留 None 让 _effective_question 回落原话（不复制一份冗余字符串）
-            return {'resolved_question': None, 'cqr_entities': None, 'cqr_anaphora': False}
+            context_fingerprint = (
+                make_context_fingerprint(state.get('conv_state'))
+                if detect_pronoun(question)
+                else None
+            )
+            return {
+                'resolved_question': None,
+                'cqr_entities': None,
+                'cqr_anaphora': False,
+                'context_fingerprint': context_fingerprint,
+            }
+        context_fingerprint = make_context_fingerprint(
+            state.get('conv_state'), extra_entities=entities
+        )
         return {
             'resolved_question': resolved,
             'cqr_entities': entities,
             'cqr_anaphora': anaphora,
+            'context_fingerprint': context_fingerprint,
         }
-
 
     def gate(state: QAState) -> dict:
         """检索门：只要在会话里就分类本轮意图(含第一问)；无会话(如 MCP 工具调用)直接 book。
@@ -1455,14 +1767,28 @@ def build_qa_graph(
     graph.add_node('record', record)
     graph.add_node('record_question', record_question)
     graph.add_node('context_load', context_load)
+    graph.add_node('analyze_query', analyze_query)
+    graph.add_node('multi_retrieve', multi_retrieve)
+    graph.add_node('multi_judge', multi_judge)
+    graph.add_node('multi_answer', multi_answer)
+    graph.add_node('verify_multi_answer', verify_multi_answer)
     graph.add_node('resolve_query', resolve_query)
     graph.add_node('gate', gate)
     graph.add_node('context_answer', context_answer)
 
     graph.add_edge(START, 'context_load')
-    graph.add_edge('context_load', 'resolve_query')
-    graph.add_edge('resolve_query', 'record_question')
-    graph.add_edge('record_question', 'gate')
+    graph.add_edge('context_load', 'analyze_query')
+    graph.add_edge('analyze_query', 'record_question')
+    graph.add_conditional_edges(
+        'record_question',
+        lambda state: 'multi' if state.get('multi_question') else 'single',
+        {'multi': 'multi_retrieve', 'single': 'resolve_query'},
+    )
+    graph.add_edge('multi_retrieve', 'multi_judge')
+    graph.add_edge('multi_judge', 'multi_answer')
+    graph.add_edge('multi_answer', 'verify_multi_answer')
+    graph.add_edge('verify_multi_answer', 'record')
+    graph.add_edge('resolve_query', 'gate')
     graph.add_conditional_edges(
         'gate',
         route_after_gate,

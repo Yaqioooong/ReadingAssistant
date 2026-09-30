@@ -114,6 +114,10 @@ function mapHistory(history) {
     role: m.role === 'assistant' ? 'assistant' : m.role === 'user' ? 'user' : 'system',
     content: m.content,
     citations: m.meta?.citations || [],
+    subquestions: m.meta?.subquestions || [],
+    evidenceVerification: m.meta?.evidence_verification || null,
+    agentPlan: m.meta?.agent_plan || null,
+    agentActions: m.meta?.agent_actions || [],
     // 缓存来源：历史消息由 record 节点写入 meta，实时响应用 resp 字段
     cacheHit: !!(m.meta?.cache_hit),
     cacheChannel: m.meta?.cache_channel || null,
@@ -164,6 +168,10 @@ async function runQuestion(text, clarification = null) {
       role: 'assistant',
       content: resp.answer || '',
       citations: resp.citations || [],
+      subquestions: resp.subquestions || [],
+      evidenceVerification: resp.evidence_verification || null,
+      agentPlan: resp.agent_plan || null,
+      agentActions: resp.agent_actions || [],
       cacheHit: !!resp.cache_hit,
       cacheChannel: resp.cache_channel || null,
       feedback: null,
@@ -210,6 +218,10 @@ async function submitClarify() {
         role: 'assistant',
         content: submitted.answer || '',
         citations: submitted.citations || [],
+        subquestions: submitted.subquestions || [],
+        evidenceVerification: submitted.evidence_verification || null,
+        agentPlan: submitted.agent_plan || null,
+        agentActions: submitted.agent_actions || [],
         feedback: null,
         feedbackBusy: false,
       })
@@ -305,6 +317,22 @@ function citationSource(c) {
   const docName = doc ? doc.filename : docId ? `文档 ${docId}` : ''
   const chapter = c.chapter && c.chapter !== '正文' ? c.chapter : ''
   return [docName, chapter].filter(Boolean).join(' · ') || '引用'
+}
+
+function subquestionStatus(status) {
+  return {
+    evidence_ready: '证据充分',
+    no_evidence: '未找到证据',
+    partial: '证据不足',
+  }[status] || status || '未知'
+}
+
+function verificationStatus(status) {
+  return {
+    verified: '已通过',
+    needs_review: '需要复核',
+    insufficient: '证据不足',
+  }[status] || status || '未判断'
 }
 
 const EXCERPT_PREVIEW_LEN = 60
@@ -416,6 +444,33 @@ onMounted(loadSessions)
                     </div>
                   </div>
                 </div>
+                <details
+                  v-if="m.subquestions?.length || m.evidenceVerification || m.agentPlan || m.agentActions?.length"
+                  class="qa-details"
+                >
+                  <summary>查看问答过程</summary>
+                  <div v-if="m.subquestions?.length" class="qa-subquestions">
+                    <div v-for="(q, qIndex) in m.subquestions" :key="q.id || qIndex" class="qa-subquestion">
+                      <span class="qa-q-index">问题 {{ qIndex + 1 }}</span>
+                      <span class="qa-q-text">{{ q.question }}</span>
+                      <span class="qa-q-status" :class="`status-${q.status || 'unknown'}`">
+                        {{ subquestionStatus(q.status) }}
+                      </span>
+                    </div>
+                  </div>
+                  <div v-if="m.evidenceVerification" class="qa-verification">
+                    <span>证据校验：{{ verificationStatus(m.evidenceVerification.status) }}</span>
+                    <span v-if="m.evidenceVerification.reason" class="qa-muted">
+                      {{ m.evidenceVerification.reason }}
+                    </span>
+                  </div>
+                  <div v-if="m.agentPlan" class="qa-plan">
+                    <span class="qa-muted">检索目标：</span>{{ m.agentPlan.objective }}
+                  </div>
+                  <div v-if="m.agentActions?.length" class="qa-actions">
+                    <span class="qa-muted">工具路径：</span>{{ m.agentActions.join(' → ') }}
+                  </div>
+                </details>
               </div>
               <div v-if="m.role === 'assistant' && m.content" class="msg-actions">
                 <button

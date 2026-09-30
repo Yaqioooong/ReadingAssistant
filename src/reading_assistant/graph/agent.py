@@ -42,6 +42,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable
@@ -51,6 +52,7 @@ from typing import Any, NamedTuple
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import tool
 
+from reading_assistant.graph.knowledge import KnowledgeGraph
 from reading_assistant.utils.logger_handler import get_logger
 
 logger = get_logger('agent')
@@ -94,6 +96,55 @@ class ToolResult(NamedTuple):
     chunks: tuple = ()
 
 
+def build_agent_plan(question: str) -> dict:
+    """根据问题形态生成零 LLM 成本的检索计划和成功条件。"""
+    text = question or ''
+    if re.search(r'第[一二三四五六七八九十百千\d]+个|第一个|最早|最后一个', text):
+        return {
+            'objective': '按书内顺序定位问题要求的最早/最晚对象，并读取细节',
+            'steps': ['枚举具体候选', '用字面检索比较章节顺序', '读取候选章节正文'],
+            'success_criteria': ['至少一个正文片段', '证据包含章节顺序或明确回目'],
+        }
+    if any(token in text for token in ('它', '他', '她', '这个', '那个', '这位', '那位')):
+        return {
+            'objective': '先确认指代对象，再查找能够直接回答追问的原文',
+            'steps': ['利用已有候选实体定位', '必要时读取完整章节', '检查答案细节是否在正文中'],
+            'success_criteria': ['至少一个正文片段', '证据能够连接指代对象与问题谓词'],
+        }
+    return {
+        'objective': '找到直接支持用户问题的原文片段',
+        'steps': ['语义或字面定位', '读取必要的章节上下文', '确认片段足以回答'],
+        'success_criteria': ['至少一个正文片段'],
+    }
+
+
+def verify_agent_evidence(question: str, chunks: list[dict], finished: bool) -> dict:
+    """对 agent 的收敛结果做便宜的证据级校验，不判断完整语义蕴含。"""
+    has_chunks = bool(chunks)
+    ordinal = bool(
+        re.search(r'第[一二三四五六七八九十百千\d]+个|第一个|最早|最后一个', question or '')
+    )
+    has_chapter = any(chunk.get('chapter_index') is not None for chunk in chunks)
+    if not has_chunks:
+        status = 'insufficient'
+        reason = '没有工具返回可用于回答的原文片段'
+    elif ordinal and not has_chapter:
+        status = 'partial'
+        reason = '有原文片段，但没有可验证的章节顺序字段'
+    elif finished:
+        status = 'verified'
+        reason = 'agent 已结束且拿到了可引用原文片段'
+    else:
+        status = 'partial'
+        reason = '预算耗尽或模型提前停止，已拿到部分原文片段'
+    return {
+        'status': status,
+        'reason': reason,
+        'evidence_count': len(chunks),
+        'has_chapter_order': has_chapter,
+    }
+
+
 # 正文回目标识：`第一回 …` / `第 12 回 …`。前言、修订说明、附录、版权页都不匹配。
 # 序数类问题（「第一个妖怪」）必须把**前后附文**排除掉，否则「前言」里提到
 # 妖怪就会成为「最早命中章」—— 实测（2026-09-21）前言确实含「妖怪」，
@@ -131,17 +182,19 @@ def coalesce_chapter(chunks: list[Any], max_chars: int = CHAPTER_SEGMENT_CHARS) 
         if not buffer:
             return
         head = buffer[0]
-        segments.append({
-            'chunk_id': head.id,
-            'text': '\n'.join(c.text or '' for c in buffer),
-            'score': 0.0,
-            'document_id': head.metadata.get('document_id'),
-            'chapter': head.metadata.get('chapter'),
-            'chapter_index': head.metadata.get('chapter_index'),
-            'citation': None,
-            'source': 'read_chapter',
-            'segment_of': len(buffer),
-        })
+        segments.append(
+            {
+                'chunk_id': head.id,
+                'text': '\n'.join(c.text or '' for c in buffer),
+                'score': 0.0,
+                'document_id': head.metadata.get('document_id'),
+                'chapter': head.metadata.get('chapter'),
+                'chapter_index': head.metadata.get('chapter_index'),
+                'citation': None,
+                'source': 'read_chapter',
+                'segment_of': len(buffer),
+            }
+        )
         buffer.clear()
 
     for chunk in chunks:
@@ -249,6 +302,18 @@ def read_chapter(chapter_index: int) -> str:
 
 
 @tool
+def graph_lookup(entity: str) -> str:
+    """查询实体在原文中的共现关系，并返回可回溯的章节证据。
+
+    只返回同一原文片段中实际出现过的实体关系，不替模型猜测人物关系。
+
+    Args:
+        entity: 要查询的人物、地点、物品或事件关键词
+    """
+    return ''
+
+
+@tool
 def locate_event(term: str) -> str:
     """定位一个**事件或人物首次出现的回目**，并给出「从这一回起，接下来若干回」的目录。
 
@@ -280,7 +345,7 @@ def finish(reason: str) -> str:
     return ''
 
 
-AGENT_TOOLS = [search, grep, list_chapters, read_chapter, finish]
+AGENT_TOOLS = [search, grep, list_chapters, read_chapter, graph_lookup, finish]
 # ⚠️ `locate_event` 已实现但**刻意不暴露**：
 #   实测 2026-09-21，加入它并强制「先定位锚点再往后扫」的流程后，同一道带锚点的
 #   序数题从「0/3 转澄清、1/3 答对」**退化为 4/4 转澄清** —— 因为定位锚点本身又是
@@ -305,19 +370,45 @@ class ToolBox:
     search_fn: Callable[[str], list[Any]]  # 注入的语义检索（带 hybrid/阈值等既有行为）
     document_ids: list[int] | None = None
     doc_titles: dict[int, str] = field(default_factory=dict)
+    knowledge_graph: KnowledgeGraph | None = field(default=None, repr=False)
+    result_cache: dict[str, ToolResult] = field(default_factory=dict, repr=False)
+    cache_hits: int = 0
+    last_cache_hit: bool = False
 
     def call(self, name: str, args: dict) -> ToolResult:
         """按 name 分发。任何异常都收敛成结构化错误，绝不冒泡炸掉整次问答。"""
+        self.last_cache_hit = False
+        cache_key = ''
+        if name != 'finish':
+            try:
+                cache_key = json.dumps(
+                    [name, args or {}], ensure_ascii=False, sort_keys=True, default=str
+                )
+            except Exception:  # pragma: no cover - 极端工具参数才会触发
+                cache_key = repr((name, args or {}))
+            cached = self.result_cache.get(cache_key)
+            if cached is not None:
+                self.cache_hits += 1
+                self.last_cache_hit = True
+                return cached
         try:
             handler = getattr(self, f'_tool_{name}', None)
             if handler is None:
-                return ToolResult(f'错误：没有名为 {name} 的工具。可用工具：'
-                                  'search / grep / list_chapters / read_chapter / finish')
-            return handler(args or {})
+                result = ToolResult(
+                    f'错误：没有名为 {name} 的工具。可用工具：'
+                    'search / grep / list_chapters / read_chapter / graph_lookup / finish'
+                )
+            else:
+                result = handler(args or {})
+            if cache_key and not result.observation.startswith('错误：'):
+                self.result_cache[cache_key] = result
+            return result
         except Exception as exc:  # noqa: BLE001 工具失败要让模型看到并可自我修正
             logger.exception('检索agent[工具异常] tool=%s', name)
-            return ToolResult(f'错误：{name} 执行失败（{type(exc).__name__}: {exc}）。'
-                              '可以换个参数或换个工具重试。')
+            return ToolResult(
+                f'错误：{name} 执行失败（{type(exc).__name__}: {exc}）。'
+                '可以换个参数或换个工具重试。'
+            )
 
     # ---- 各工具 ----
 
@@ -392,9 +483,7 @@ class ToolBox:
         # 过宽词的告警（2026-09-24 新增）。**只提示、不拒绝、不改片段** ——
         # 拒绝执行会把 agent 的步数预算白白吃掉一步，而它本来就已经很紧（max_steps=6）。
         broad = [
-            (name, count)
-            for name, count in per_term_counts.items()
-            if count > _BROAD_GREP_MAX_HITS
+            (name, count) for name, count in per_term_counts.items() if count > _BROAD_GREP_MAX_HITS
         ]
         warnings = [
             f'⚠️ 「{name}」在全书命中 {count} 条，**过宽、几乎无法定位** ——'
@@ -405,8 +494,11 @@ class ToolBox:
         for doc_id, chapters in by_doc.items():
             title = self.doc_titles.get(doc_id) or f'文档{doc_id}'
             ordered = sorted(chapters)
-            narrative = [ci for ci in ordered
-                         if is_narrative_chapter(chapters[ci][0].metadata.get('chapter'))]
+            narrative = [
+                ci
+                for ci in ordered
+                if is_narrative_chapter(chapters[ci][0].metadata.get('chapter'))
+            ]
             front_matter = [ci for ci in ordered if ci not in narrative]
 
             lines.append(f'\n《{_clip(title, 30)}》：{len(ordered)} 章命中。')
@@ -488,6 +580,43 @@ class ToolBox:
             return ToolResult('该书没有可用的章节信息。')
         return ToolResult('\n'.join(lines))
 
+    def _tool_graph_lookup(self, args: dict) -> ToolResult:
+        entity = str(args.get('entity') or '').strip()
+        if not entity:
+            return ToolResult('错误：entity 不能为空。')
+        if self.knowledge_graph is None:
+            self.knowledge_graph = KnowledgeGraph.from_chunks(
+                self.vector_store.all_chunks(), self.document_ids
+            )
+        relations = self.knowledge_graph.lookup(entity, limit=20)
+        if not relations:
+            return ToolResult(
+                f'图索引没有找到「{entity}」的共现关系。'
+                '这不等于书中不存在该实体，请改用 grep 或 search。'
+            )
+        chunks = []
+        lines = [f'图索引查询「{entity}」：找到 {len(relations)} 条有原文证据的共现关系。']
+        for relation in relations:
+            chapter_name = _clip(str(relation.chapter or ''), 28)
+            chapter = f'chapter_index={relation.chapter_index} 《{chapter_name}》'
+            lines.append(
+                f'- {relation.source} --{relation.predicate}-- {relation.target}；{chapter}'
+                f'；证据：{_clip(relation.evidence, 180)}'
+            )
+            chunks.append(
+                {
+                    'chunk_id': relation.chunk_id,
+                    'text': relation.evidence,
+                    'score': 0.0,
+                    'document_id': relation.document_id,
+                    'chapter': relation.chapter,
+                    'chapter_index': relation.chapter_index,
+                    'citation': None,
+                    'source': 'graph_lookup',
+                }
+            )
+        return ToolResult('\n'.join(lines), tuple(chunks))
+
     def _tool_locate_event(self, args: dict) -> ToolResult:
         """定位锚点事件所在回目，并给出「从该回起接下来若干回」的目录。
 
@@ -522,17 +651,14 @@ class ToolBox:
             # 而「收孙悟空」这件事发生在第十四回。所以把命中回都列出来，
             # 让模型能看出这个词横跨了哪几回，而不是只信赖第一个。
             if len(narrative) > 1:
-                spread = '、'.join(
-                    f'{i}({_clip(n, 12)})' for i, n in narrative[:6]
-                )
+                spread = '、'.join(f'{i}({_clip(n, 12)})' for i, n in narrative[:6])
                 lines.append(
                     f'  ⚠️ 注意：「{term}」在 {len(narrative)} 回里出现 —— {spread}'
                     f'{"…" if len(narrative) > 6 else ""}。'
                     '「首次提及」**可能早于**「事件发生」的那一回，请结合回目名判断。'
                 )
             chapters = self.vector_store.list_chapters(doc_id)
-            after = [(i, n) for i, n in chapters
-                     if i >= anchor_index and is_narrative_chapter(n)]
+            after = [(i, n) for i, n in chapters if i >= anchor_index and is_narrative_chapter(n)]
             if after:
                 lines.append(
                     f'\n【从锚点起、按书内顺序的接下来 {min(len(after), 12)} 回】'
@@ -568,8 +694,7 @@ class ToolBox:
             found.extend(self.vector_store.get_chapter(doc_id, chapter_index))
         if not found:
             return ToolResult(
-                f'没有找到 chapter_index={chapter_index} 的章节。'
-                '请先用 list_chapters 确认章序号。'
+                f'没有找到 chapter_index={chapter_index} 的章节。请先用 list_chapters 确认章序号。'
             )
         text = '\n'.join(c.text or '' for c in found)
         chapter_name = str(found[0].metadata.get('chapter') or '')
@@ -584,8 +709,7 @@ class ToolBox:
         # observation 给「分段开头」的概览（模型据此判断够不够），
         # **完整正文进 chunks**（供 answer 使用）。两者职责不同，不要混。
         preview = '\n'.join(
-            f'  [{i + 1}/{len(found)}] {_clip(c.text or "", 200)}'
-            for i, c in enumerate(found)
+            f'  [{i + 1}/{len(found)}] {_clip(c.text or "", 200)}' for i, c in enumerate(found)
         )
         # 邻接提示（2026-09-24 新增）：给一个**确定**的「下一回」入口。
         # 依据：agent 手里有 idx 60，正解就在 idx 61，中间只隔一步「读下一章」，
@@ -667,6 +791,8 @@ SYSTEM_PROMPT = """你是阅读助手的检索策略模块。你的唯一任务�
 - 「有没有提到过」「出现几次」同样以 grep 为准 —— 语义检索对这类问题会全部落空，
   因为答案段落里不会出现「第一个」这种词。
 - search 只在你知道大概内容、但不确定原文用词时使用。
+- graph_lookup 适合查人物/地点/物品之间是否在同一原文片段出现；它返回的是“共现”证据，
+  不是模型推断出的真实关系。需要确认关系语义时，继续用 grep 或 read_chapter 查看原文。
 - 拿到足以回答的原文后就调用 finish，不要过度检索。每多一步都会增加用户等待。
 - 若多次尝试后确认书里确实没有相关内容，也调用 finish 并说明「书中未找到」。
 
@@ -790,6 +916,9 @@ class AgentRun:
     finished: bool = False
     finish_reason: str = ''
     stopped_by: str = ''  # finish | no_tool_call | budget | error
+    plan: dict = field(default_factory=dict)
+    verification: dict = field(default_factory=dict)
+    cache_hits: int = 0
 
 
 def run_agent_loop(
@@ -810,7 +939,7 @@ def run_agent_loop(
     - 模型调用异常。
     """
     budget = budget or AgentBudget()
-    run = AgentRun()
+    run = AgentRun(plan=build_agent_plan(question))
 
     context_lines = [f'用户问题：{question}']
     if history:
@@ -822,8 +951,7 @@ def run_agent_loop(
         context_lines.append(f'【最近对话（用于理解指代）】\n{recent}')
     if toolbox.doc_titles:
         titles = '、'.join(
-            f'文档{doc_id}《{_clip(str(name), 34)}》'
-            for doc_id, name in toolbox.doc_titles.items()
+            f'文档{doc_id}《{_clip(str(name), 34)}》' for doc_id, name in toolbox.doc_titles.items()
         )
         context_lines.append(f'【可查范围】{titles}')
     if seed_chunks:
@@ -832,10 +960,14 @@ def run_agent_loop(
             f'{_clip(str(c.get("text") or ""), 100)}'
             for c in seed_chunks[:4]
         )
-        context_lines.append(
-            f'【初次语义检索已拿到的片段（判断是否已经够了）】\n{preview}'
-        )
-    context_lines.append('请决定下一步动作。')
+        context_lines.append(f'【初次语义检索已拿到的片段（判断是否已经够了）】\n{preview}')
+    context_lines.append(
+        '【检索计划】\n'
+        f'目标：{run.plan["objective"]}\n'
+        f'步骤：{" → ".join(run.plan["steps"])}\n'
+        f'成功条件：{"；".join(run.plan["success_criteria"])}\n'
+        '请决定下一步动作，并在满足成功条件后调用 finish。'
+    )
 
     messages: list[Any] = [
         SystemMessage(content=SYSTEM_PROMPT),
@@ -868,8 +1000,11 @@ def run_agent_loop(
         #    responding to each 'tool_call_id'"
         # 实测（2026-09-21）模型很自然地一次返回两个（search + list_chapters），
         # 只回一个就炸 —— 即使 prompt 里写了「一次只调用一个工具」也不能指望它遵守。
-        messages.append(response if isinstance(response, AIMessage) else AIMessage(
-            content=getattr(response, 'content', '') or '', tool_calls=list(calls)))
+        messages.append(
+            response
+            if isinstance(response, AIMessage)
+            else AIMessage(content=getattr(response, 'content', '') or '', tool_calls=list(calls))
+        )
 
         finishing = False
         for call in calls[:MAX_TOOL_CALLS_PER_ROUND]:
@@ -885,43 +1020,57 @@ def run_agent_loop(
                 observation = _clip(result.observation, MAX_OBSERVATION_CHARS)
                 logger.info(
                     '检索agent[finish] steps=%d reason=%s',
-                    run.steps, _clip(run.finish_reason, 80),
+                    run.steps,
+                    _clip(run.finish_reason, 80),
                 )
             else:
                 observation = _clip(result.observation, MAX_OBSERVATION_CHARS)
                 budget.spent_observation_chars += len(observation)
                 run.chunks.extend(result.chunks)
-                run.trace.append({
-                    'step': run.steps,
-                    'action': name,
-                    'args': {k: _clip(str(v), 80) for k, v in args.items()},
-                    'observation_chars': len(observation),
-                    'new_chunks': len(result.chunks),
-                    'cost_ms': round((time.perf_counter() - start) * 1000),
-                })
+                run.trace.append(
+                    {
+                        'step': run.steps,
+                        'action': name,
+                        'args': {k: _clip(str(v), 80) for k, v in args.items()},
+                        'observation_chars': len(observation),
+                        'new_chunks': len(result.chunks),
+                        'cache_hit': toolbox.last_cache_hit,
+                        'cost_ms': round((time.perf_counter() - start) * 1000),
+                    }
+                )
                 logger.info(
                     '检索agent[step %d] action=%s args=%s obs=%d字 new_chunks=%d (%.0fms)',
-                    run.steps, name, _clip(str(args), 70), len(observation),
-                    len(result.chunks), (time.perf_counter() - start) * 1000,
+                    run.steps,
+                    name,
+                    _clip(str(args), 70),
+                    len(observation),
+                    len(result.chunks),
+                    (time.perf_counter() - start) * 1000,
                 )
-            messages.append(ToolMessage(
-                content=observation, tool_call_id=call.get('id') or '',
-            ))
+            messages.append(
+                ToolMessage(
+                    content=observation,
+                    tool_call_id=call.get('id') or '',
+                )
+            )
 
         # 超出本轮上限的 tool_call 也必须各回一条，否则下一轮请求同样 400
         for call in calls[MAX_TOOL_CALLS_PER_ROUND:]:
-            messages.append(ToolMessage(
-                content='（本轮动作数已达上限，此动作被跳过）',
-                tool_call_id=call.get('id') or '',
-            ))
+            messages.append(
+                ToolMessage(
+                    content='（本轮动作数已达上限，此动作被跳过）',
+                    tool_call_id=call.get('id') or '',
+                )
+            )
 
         if finishing:
             break
 
     if not run.stopped_by:
         run.stopped_by = 'budget'
-        logger.info('检索agent[预算耗尽] steps=%d obs=%d字',
-                    run.steps, budget.spent_observation_chars)
+        logger.info(
+            '检索agent[预算耗尽] steps=%d obs=%d字', run.steps, budget.spent_observation_chars
+        )
 
     # 去重（同一 chunk 可能被多个工具取到），保持「先取到的优先」。
     deduped: list[dict] = []
@@ -942,4 +1091,14 @@ def run_agent_loop(
     # 职责划分：**累积不设限（只是些轻量 dict），最终裁剪只由 merge_agent_chunks 负责**
     # —— 它知道来源优先级与「给原有片段留名额」，这里截断只会让它拿不到完整信息。
     run.chunks = deduped
+    run.cache_hits = toolbox.cache_hits
+    run.verification = verify_agent_evidence(question, run.chunks, run.finished)
+    run.trace.append(
+        {
+            'step': run.steps,
+            'action': 'verify',
+            'status': run.verification['status'],
+            'evidence_count': run.verification['evidence_count'],
+        }
+    )
     return run

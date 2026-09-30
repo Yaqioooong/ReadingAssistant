@@ -130,9 +130,11 @@ def delete_chat_session(
     """删除会话及其全部消息与 HITL 任务（连带回收挂起的断点）。"""
     # 会话没了，它下面挂起的那些断点也永远不会被恢复 → 一并作废
     thread_ids = [
-        t for t in session.scalars(
+        t
+        for t in session.scalars(
             select(HitlTask.thread_id).where(HitlTask.session_id == session_id)
-        ) if t
+        )
+        if t
     ]
     if not delete_session(session, session_id):
         logger.warning('删除会话失败，会话不存在 session_id=%s', session_id)
@@ -169,7 +171,8 @@ def ask_question(
         if prior is not None:
             logger.info(
                 '提问[幂等] 该澄清已产生过回答，直接复用 session_id=%s message_id=%s',
-                session_id, prior.id,
+                session_id,
+                prior.id,
             )
             return schemas.AskResponse(
                 answer=prior.content,
@@ -202,8 +205,12 @@ def ask_question(
     # 所以 task_id 只能从**挂起载荷**里取 —— 见 qa.create_hitl 的 interrupt(payload)
     pending = interrupt_payload(result)
     if pending is not None:
-        logger.info('提问挂起等待澄清 session_id=%s thread=%s task=%s',
-                    session_id, thread_id, pending.get('hitl_task_id'))
+        logger.info(
+            '提问挂起等待澄清 session_id=%s thread=%s task=%s',
+            session_id,
+            thread_id,
+            pending.get('hitl_task_id'),
+        )
         _record_cache_event(
             session_factory,
             session_id=session_id,
@@ -227,6 +234,9 @@ def ask_question(
             agent_steps=result.get('agent_steps') or 0,
             cqr_entities=list(result.get('cqr_entities') or []),
             agent_actions=[t.get('action', '') for t in (result.get('agent_trace') or [])],
+            agent_plan=result.get('agent_plan'),
+            agent_verification=result.get('agent_verification'),
+            agent_cache_hits=result.get('agent_cache_hits') or 0,
             cache_hit=bool(result.get('cache_hit')),
             cache_channel=result.get('cache_channel'),
         )
@@ -236,9 +246,14 @@ def ask_question(
     # （与 disabled 区分：disabled 是多文档或缓存开关关闭，skipped 是本就不适用缓存）
     skipped = result.get('intent') in ('chat', 'history')
     channel = result.get('cache_channel') or ('skipped' if skipped else None)
-    logger.info('提问完成 session_id=%s (%.0fms) hit=%s channel=%s cit=%d', session_id,
-                cost_ms, result.get('cache_hit', False), channel,
-                len(result.get('citations') or []))
+    logger.info(
+        '提问完成 session_id=%s (%.0fms) hit=%s channel=%s cit=%d',
+        session_id,
+        cost_ms,
+        result.get('cache_hit', False),
+        channel,
+        len(result.get('citations') or []),
+    )
     _record_cache_event(
         session_factory,
         session_id=session_id,
@@ -263,7 +278,12 @@ def ask_question(
         agent_steps=result.get('agent_steps') or 0,
         cqr_entities=list(result.get('cqr_entities') or []),
         agent_actions=[t.get('action', '') for t in (result.get('agent_trace') or [])],
+        agent_plan=result.get('agent_plan'),
+        agent_verification=result.get('agent_verification'),
+        agent_cache_hits=result.get('agent_cache_hits') or 0,
         cache_hit=bool(result.get('cache_hit')),
         cache_channel=channel,
         cache_similarity=result.get('cache_similarity'),
+        subquestions=list(result.get('subquestions') or []),
+        evidence_verification=result.get('evidence_verification'),
     )
